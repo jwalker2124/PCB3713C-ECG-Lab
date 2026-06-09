@@ -588,8 +588,6 @@ export const RHYTHMS = {
 // defects → irregular/Tier-2 rhythms).
 export const RHYTHM_ORDER = [
   'normalSinus',
-  'sinusTachycardia',
-  'sinusBradycardia',
   'firstDegreeBlock',
   'lbbb',
   'rbbb',
@@ -696,7 +694,7 @@ function ekgNoise(tMs) {
 // enough to feel "alive" without smearing the carefully-tuned wave shapes, or
 // distorting the deliberate timing relationships baked into the Tier-2
 // macro-cycles (e.g. a PVC's compensatory pause).
-function warpTime(tMs) {
+export function warpTime(tMs) {
   return (
     tMs +
     30 * Math.sin(tMs * 0.00073 + 0.9) +
@@ -721,10 +719,19 @@ function warpTime(tMs) {
 // (Noise is added AFTER projection — it represents ambient electrical
 // interference picked up at the electrode, not a real cardiac source with
 // its own axis, so every lead picks up the same texture.)
-export function ekgVoltage(elapsedMs, cycleMs, waves, leadAxisDeg = LEADS.I.axisDeg) {
-  const warpedMs = warpTime(elapsedMs)
-  const tInCycle = ((warpedMs % cycleMs) + cycleMs) % cycleMs
-  return cycleVoltage(tInCycle, waves, leadAxisDeg) + ekgNoise(elapsedMs)
+// `nativeCycleMs` is provided when the caller has scaled `cycleMs` away from
+// the rhythm's original (native) length — e.g. the HR slider sped up a Tier-2
+// macro-cycle rhythm. In that case we also scale the time position within the
+// cycle so all beats compress/expand proportionally rather than the last beats
+// getting clipped off. For Tier-1 rhythms (no nativeCycleMs), tInCycle is used
+// as-is.
+export function ekgVoltage(elapsedMs, cycleMs, waves, leadAxisDeg = LEADS.I.axisDeg, nativeCycleMs = null) {
+  const warpedMs   = warpTime(elapsedMs)
+  const tInCycle   = ((warpedMs % cycleMs) + cycleMs) % cycleMs
+  const tEvaluated = nativeCycleMs !== null
+    ? tInCycle * (nativeCycleMs / cycleMs)  // scale time axis for Tier-2 rate changes
+    : tInCycle
+  return cycleVoltage(tEvaluated, waves, leadAxisDeg) + ekgNoise(elapsedMs)
 }
 
 // ─────────────────────────────────────────────────────────────────────────

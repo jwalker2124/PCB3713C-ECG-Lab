@@ -8,8 +8,9 @@ import {
   cycleLengthMs,
   ekgVoltage,
   measureIntervals,
-  expectedQtMs,
+  warpTime,
 } from '../../lib/ekgEngine'
+import HeartAnimation from '../../components/HeartAnimation'
 
 // ── Visual tuning constants ──────────────────────────────────────────────
 const CANVAS_WIDTH  = 900
@@ -97,14 +98,14 @@ function drawGrid(ctx, width, height) {
 // For every pixel column we work out how long ago (in ms) that column
 // represents, subtract that from the current elapsed time to get an actual
 // sample time, and ask the engine what the voltage was at that instant.
-function drawWaveform(ctx, width, height, elapsedMs, cycleMs, waves, leadAxisDeg) {
+function drawWaveform(ctx, width, height, elapsedMs, cycleMs, waves, leadAxisDeg, nativeCycleMs) {
   const baselineY = height * BASELINE_FRAC
 
   ctx.beginPath()
   for (let x = 0; x <= width; x++) {
     const ageMs      = (width - x) / PIXELS_PER_MS
     const sampleAtMs = elapsedMs - ageMs
-    const voltageMv  = ekgVoltage(sampleAtMs, cycleMs, waves, leadAxisDeg)
+    const voltageMv  = ekgVoltage(sampleAtMs, cycleMs, waves, leadAxisDeg, nativeCycleMs)
     const y          = baselineY - voltageMv * PIXELS_PER_MV
 
     if (x === 0) ctx.moveTo(x, y)
@@ -130,6 +131,7 @@ export default function EKGWaveformPrototype() {
   const canvasRef = useRef(null)
   const [rhythmId, setRhythmId] = useState('normalSinus')
   const [leadId, setLeadId]     = useState(DEFAULT_LEAD_ID)
+  const [hrBpm, setHrBpm]       = useState(RHYTHMS['normalSinus'].heartRateBpm)
   const [isPaused, setIsPaused] = useState(false)
 
   // Pausing freezes the displayed trace WITHOUT losing track of "where we
@@ -164,6 +166,10 @@ export default function EKGWaveformPrototype() {
     setIsPaused(willBePaused)
   }
 
+  // Shared clock written each frame by the render loop and read by HeartAnimation's
+  // own rAF loop for direct SVG DOM updates — zero React re-renders at 60fps.
+  const heartClockRef = useRef({ elapsedMs: 0, cycleMs: 800, tInCycle: 0, nativeCycleMs: null })
+
   // The render loop (below) reads the active rhythm through this ref rather
   // than capturing it in the effect's closure. That lets switching the
   // dropdown change what's drawn on the very next frame — instantly, mid-
@@ -181,6 +187,18 @@ export default function EKGWaveformPrototype() {
   useEffect(() => {
     activeLeadAxisRef.current = LEADS[leadId].axisDeg
   }, [leadId])
+
+  // HR ref for the render loop — same pattern as rhythm/lead refs above.
+  // When the rhythm changes, reset the slider to that rhythm's default rate.
+  const activeHrRef = useRef(hrBpm)
+  useEffect(() => {
+    activeHrRef.current = hrBpm
+  }, [hrBpm])
+  useEffect(() => {
+    const defaultHr = RHYTHMS[rhythmId].heartRateBpm
+    setHrBpm(defaultHr)
+    activeHrRef.current = defaultHr
+  }, [rhythmId])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -206,16 +224,30 @@ export default function EKGWaveformPrototype() {
         frozenElapsedMs = timestampMs - startTimeMs - pausedAccumMsRef.current
       }
 
-      const rhythm  = activeRhythmRef.current
-      // Tier-2 (irregular) rhythms specify their own macro-cycle length
-      // directly, since their true repeat length isn't simply derived from
-      // a single heart rate. Tier-1 rhythms have no `cycleMs`, so they fall
-      // back to the rate-derived length as before.
-      const cycleMs = rhythm.cycleMs ?? cycleLengthMs(rhythm.heartRateBpm)
+      const rhythm        = activeRhythmRef.current
+      const hr            = activeHrRef.current
+      // Tier-2 rhythms scale their full macro-cycle proportionally with the HR
+      // slider so all beats compress/expand together. nativeCycleMs is passed
+      // to ekgVoltage so it can scale the time axis to match. Tier-1 rhythms
+      // derive cycleMs directly from rate; no time-axis scaling needed.
+      const nativeCycleMs = rhythm.cycleMs ?? null
+      const cycleMs       = rhythm.cycleMs
+        ? rhythm.cycleMs * (rhythm.heartRateBpm / hr)
+        : cycleLengthMs(hr)
+
+      // Write shared clock so HeartAnimation stays frame-accurate
+      const warpedForClock = warpTime(frozenElapsedMs)
+      const tInCycleRaw    = ((warpedForClock % cycleMs) + cycleMs) % cycleMs
+      heartClockRef.current = {
+        elapsedMs:    frozenElapsedMs,
+        cycleMs,
+        tInCycle:     tInCycleRaw,
+        nativeCycleMs,
+      }
 
       ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
       drawGrid(ctx, CANVAS_WIDTH, CANVAS_HEIGHT)
-      drawWaveform(ctx, CANVAS_WIDTH, CANVAS_HEIGHT, frozenElapsedMs, cycleMs, rhythm.waves, activeLeadAxisRef.current)
+      drawWaveform(ctx, CANVAS_WIDTH, CANVAS_HEIGHT, frozenElapsedMs, cycleMs, rhythm.waves, activeLeadAxisRef.current, nativeCycleMs)
 
       animationFrameId = requestAnimationFrame(render)
     }
@@ -229,20 +261,20 @@ export default function EKGWaveformPrototype() {
 
   const rhythm = RHYTHMS[rhythmId]
 
-  // measureIntervals() assumes one P, one Q, one R, one S, one T per cycle —
-  // true for every Tier-1 rhythm, but meaningless for the Tier-2 "irregular"
-  // rhythms above, whose macro-cycles contain multiple (or zero) instances
-  // of some wave names by design. Those rhythms are flagged `measurable:
-  // false`, and we skip the measurement entirely rather than feed them
-  // through a function that assumes a shape they don't have.
+  // measureIntervals() assumes one P, Q, R, S, T per cycle — valid for Tier-1
+  // rhythms. Tier-2 rhythms are flagged `measurable: false`; we skip them.
   const isMeasurable = rhythm.measurable !== false
   const intervals    = isMeasurable ? measureIntervals(rhythm.waves) : null
 
-  // QT's "normal" value depends on heart rate (Bazett's correction) — so
-  // instead of comparing against one fixed number, we compute what we'd
-  // *expect* to see at this rhythm's rate and check how close we landed.
-  const expectedQt   = expectedQtMs(rhythm.heartRateBpm)
-  const qtToleranceMs = 30
+  const rrMs = cycleLengthMs(hrBpm)
+  const qtcMs      = intervals ? Math.round(intervals.qtIntervalMs / Math.sqrt(rrMs / 1000)) : null
+
+  // For normal sinus, the HR slider subsumes tachy / bradycardia classification.
+  const sinusLabel = rhythmId === 'normalSinus'
+    ? hrBpm > 100 ? 'Sinus Tachycardia'
+    : hrBpm < 60  ? 'Sinus Bradycardia'
+    : 'Normal Sinus Rhythm'
+    : null
 
   return (
     <div className="min-h-screen p-8 max-w-5xl mx-auto" style={{ backgroundColor: '#0a0e1a' }}>
@@ -284,6 +316,24 @@ export default function EKGWaveformPrototype() {
           </select>
         </div>
 
+        <div className="flex flex-col gap-1.5 min-w-[160px]">
+          <div className="flex items-center justify-between">
+            <label className="text-xs text-gray-400">Heart rate</label>
+            <span className="text-xs font-bold tabular-nums text-emerald-400">
+              {hrBpm} bpm
+            </span>
+          </div>
+          <input
+            type="range"
+            min={30}
+            max={200}
+            step={5}
+            value={hrBpm}
+            onChange={e => setHrBpm(Number(e.target.value))}
+            className="w-full accent-emerald-500"
+          />
+        </div>
+
         <button
           onClick={togglePause}
           className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium
@@ -308,18 +358,27 @@ export default function EKGWaveformPrototype() {
           (see GRID_MINOR_MS / GRID_MAJOR_MS / PIXELS_PER_MV above). */}
       <div className="flex flex-wrap gap-2 mb-3">
         <LegendBadge label="Lead" value={`${LEADS[leadId].label} (axis ${LEADS[leadId].axisDeg}°)`} />
+        {sinusLabel && <LegendBadge label="Classification" value={sinusLabel} highlight={sinusLabel !== 'Normal Sinus Rhythm'} />}
         <LegendBadge label="Time scale" value={`${GRID_MINOR_MS} ms / small square · ${GRID_MAJOR_MS} ms / large square`} />
         <LegendBadge label="Voltage scale" value="0.5 mV / square" />
       </div>
 
-      <div className="rounded-2xl bg-gray-900 border border-gray-800 p-4 mb-6">
-        <canvas
-          ref={canvasRef}
-          width={CANVAS_WIDTH}
-          height={CANVAS_HEIGHT}
-          className="w-full rounded-lg"
-          style={{ backgroundColor: '#0a0e1a' }}
+      <div className="flex gap-4 mb-6 items-start">
+        <HeartAnimation
+          clockRef={heartClockRef}
+          rhythmId={rhythmId}
+          rhythm={rhythm}
+          className="flex-shrink-0"
         />
+        <div className="rounded-2xl bg-gray-900 border border-gray-800 p-4 flex-1">
+          <canvas
+            ref={canvasRef}
+            width={CANVAS_WIDTH}
+            height={CANVAS_HEIGHT}
+            className="w-full rounded-lg"
+            style={{ backgroundColor: '#0a0e1a' }}
+          />
+        </div>
       </div>
 
       {/* Measured intervals — compare these against the B&B reference ranges
@@ -347,10 +406,10 @@ export default function EKGWaveformPrototype() {
             inRange={intervals.qrsDurationMs < 120}
           />
           <IntervalCard
-            label="QT interval"
-            value={intervals.qtIntervalMs}
-            reference={`Expected ~${Math.round(expectedQt)} ms at ${rhythm.heartRateBpm} bpm (Bazett)`}
-            inRange={Math.abs(intervals.qtIntervalMs - expectedQt) <= qtToleranceMs}
+            label="QTc (Bazett-corrected)"
+            value={qtcMs}
+            reference={`Raw QT ${Math.round(intervals.qtIntervalMs)} ms · Normal QTc ≤ 440 ms`}
+            inRange={qtcMs <= 440}
           />
         </div>
       ) : (
@@ -369,11 +428,11 @@ export default function EKGWaveformPrototype() {
   )
 }
 
-function LegendBadge({ label, value }) {
+function LegendBadge({ label, value, highlight = false }) {
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-800">
+    <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${highlight ? 'bg-amber-950/40 border-amber-700/50' : 'bg-gray-900 border-gray-800'}`}>
       <span className="text-xs uppercase tracking-widest text-gray-500">{label}</span>
-      <span className="text-xs text-gray-300 font-medium">{value}</span>
+      <span className={`text-xs font-medium ${highlight ? 'text-amber-400' : 'text-gray-300'}`}>{value}</span>
     </div>
   )
 }
