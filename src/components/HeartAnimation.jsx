@@ -1,15 +1,6 @@
 import { useEffect, useRef, useMemo } from 'react'
 
 // ─── Conduction map builder ──────────────────────────────────────────────────
-// Derives activation windows from the rhythm's wave geometry so timing stays
-// in sync with the EKG strip automatically when wave params are tuned.
-//
-// Each entry: { id, onsetMs, offsetMs, state }
-// state: 'active' | 'blocked' | 'delayed' | 'ectopic' | 'shimmer' | 'hidden'
-//
-// For Tier-2 rhythms, multiple beats are encoded as separate entries sharing
-// the same station id — the animation loop checks all windows each frame.
-// ─────────────────────────────────────────────────────────────────────────────
 export function buildConductionMap(rhythmId, waves) {
   const w   = name => waves.find(wv => wv.name === name)
   const has  = name => !!w(name)
@@ -36,16 +27,19 @@ export function buildConductionMap(rhythmId, waves) {
     const pOff = beatOffset + (has('P') ? off('P') : 130)
     const qOn  = beatOffset + (has('Q') ? on('Q')  : 250)
     const sOff = beatOffset + (has('S') ? off('S') : 320)
+    const tOff = beatOffset + (has('T') ? off('T') : 430)
     const rCtr = beatOffset + (has('R') ? w('R').center : 284)
     const rSig = has('R') ? w('R').sigma : 12
 
     const entries = []
 
     if (!hideSA && !ectopicAtria && !pacerBeat)
-      entries.push({ id: 'sa',      onsetMs: pOn,       offsetMs: pOn + 40,           state })
+      entries.push({ id: 'sa',       onsetMs: pOn,       offsetMs: pOn + 40,           state })
     if (!hideAtria && !ectopicAtria && !pacerBeat) {
-      entries.push({ id: 'ra',      onsetMs: pOn + 10,  offsetMs: pOff,               state })
-      entries.push({ id: 'la',      onsetMs: pOn + 25,  offsetMs: pOff,               state })
+      entries.push({ id: 'ra',       onsetMs: pOn + 10,  offsetMs: pOff,               state })
+      // Bachmann's bundle: explicit right-to-left interatrial pathway
+      entries.push({ id: 'bachmann', onsetMs: pOn + 12,  offsetMs: pOn + 32,           state })
+      entries.push({ id: 'la',       onsetMs: pOn + 25,  offsetMs: pOff,               state })
     }
     if (ectopicAtria && !pacerBeat) {
       entries.push({ id: 'ectopicFocus', onsetMs: pOn,      offsetMs: pOn + 40,       state: 'ectopic' })
@@ -70,6 +64,10 @@ export function buildConductionMap(rhythmId, waves) {
     entries.push({ id: 'apex', onsetMs: Math.max(rvOn, lvOn) + 15, offsetMs: sOff + Math.max(rvDelay, lvDelay) + 20, state: pacerBeat ? 'ectopic' : state })
     entries.push({ id: '_rwave', onsetMs: rCtr, offsetMs: rCtr, rCenter: rCtr, rSigma: rSig, state: 'meta' })
 
+    // Ventricular repolarization: base-to-apex (opposite direction to depolarization)
+    entries.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff, state: 'repol' })
+    entries.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff, state: 'repol' })
+
     return entries
   }
 
@@ -88,15 +86,19 @@ export function buildConductionMap(rhythmId, waves) {
     case 'rbbb':
       return beatWindows(0, { rbundleState: 'blocked', rvDelay: 60 })
 
+    case 'vtach':
+      return beatWindows(0, { hideSA: true, hideAtria: true, hideAV: true, hideBundles: true, state: 'ectopic' })
+
     case 'thirdDegreeBlock': {
       const map = []
       const pWaves = waves.filter(wv => wv.name === 'P')
       pWaves.forEach(pw => {
         const pOn  = pw.center - 2 * pw.sigma
         const pOff = pw.center + 2 * pw.sigma
-        map.push({ id: 'sa', onsetMs: pOn,      offsetMs: pOn + 40, state: 'active' })
-        map.push({ id: 'ra', onsetMs: pOn + 10, offsetMs: pOff,     state: 'active' })
-        map.push({ id: 'la', onsetMs: pOn + 25, offsetMs: pOff,     state: 'active' })
+        map.push({ id: 'sa',       onsetMs: pOn,       offsetMs: pOn + 40, state: 'active' })
+        map.push({ id: 'ra',       onsetMs: pOn + 10,  offsetMs: pOff,     state: 'active' })
+        map.push({ id: 'bachmann', onsetMs: pOn + 12,  offsetMs: pOn + 32, state: 'active' })
+        map.push({ id: 'la',       onsetMs: pOn + 25,  offsetMs: pOff,     state: 'active' })
       })
       map.push({ id: 'av', onsetMs: 0, offsetMs: 9999, state: 'blocked' })
       const qEsc = waves.find(wv => wv.name === 'Q')
@@ -104,10 +106,14 @@ export function buildConductionMap(rhythmId, waves) {
         const qOn  = qEsc.center - 2 * qEsc.sigma
         const sWave = waves.find(wv => wv.name === 'S')
         const sOff  = sWave ? sWave.center + 2 * sWave.sigma : qOn + 80
+        const tWave = waves.find(wv => wv.name === 'T')
+        const tOff  = tWave ? tWave.center + 2 * tWave.sigma : sOff + 130
         const rW    = waves.find(wv => wv.name === 'R')
-        map.push({ id: 'rv',   onsetMs: qOn + 15, offsetMs: sOff,      state: 'active' })
-        map.push({ id: 'lv',   onsetMs: qOn + 15, offsetMs: sOff,      state: 'active' })
-        map.push({ id: 'apex', onsetMs: qOn + 30, offsetMs: sOff + 20, state: 'active' })
+        map.push({ id: 'rv',      onsetMs: qOn + 15,  offsetMs: sOff,      state: 'active' })
+        map.push({ id: 'lv',      onsetMs: qOn + 15,  offsetMs: sOff,      state: 'active' })
+        map.push({ id: 'apex',    onsetMs: qOn + 30,  offsetMs: sOff + 20, state: 'active' })
+        map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
+        map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
         if (rW) map.push({ id: '_rwave', onsetMs: rW.center, offsetMs: rW.center, rCenter: rW.center, rSigma: rW.sigma, state: 'meta' })
       }
       return map
@@ -125,6 +131,11 @@ export function buildConductionMap(rhythmId, waves) {
           return Math.abs(wv.center - qw.center) < Math.abs(best.center - qw.center) ? wv : best
         }, { center: 9999, sigma: 10 })
         const sOff = sWave.center + 2 * sWave.sigma
+        const tWave = waves.reduce((best, wv) => {
+          if (wv.name !== 'T') return best
+          return Math.abs(wv.center - qw.center) < Math.abs(best.center - qw.center) ? wv : best
+        }, { center: 9999, sigma: 20 })
+        const tOff = tWave.center < 9999 ? tWave.center + 2 * tWave.sigma : sOff + 130
         const rWave = waves.reduce((best, wv) => {
           if (wv.name !== 'R') return best
           return Math.abs(wv.center - qw.center) < Math.abs(best.center - qw.center) ? wv : best
@@ -136,6 +147,8 @@ export function buildConductionMap(rhythmId, waves) {
         map.push({ id: 'rv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
         map.push({ id: 'lv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
         map.push({ id: 'apex',    onsetMs: qOn + 35,  offsetMs: sOff + 20, state: 'active' })
+        map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
+        map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
         if (rWave.center < 9999) map.push({ id: '_rwave', onsetMs: rWave.center, offsetMs: rWave.center, rCenter: rWave.center, rSigma: rWave.sigma, state: 'meta' })
       })
       return map
@@ -156,7 +169,12 @@ export function buildConductionMap(rhythmId, waves) {
           if (wv.name !== 'S') return best
           return Math.abs(wv.center - qw.center) < Math.abs(best.center - qw.center) ? wv : best
         }, { center: 9999, sigma: 10 })
+        const nearT = waves.reduce((best, wv) => {
+          if (wv.name !== 'T') return best
+          return Math.abs(wv.center - qw.center) < Math.abs(best.center - qw.center) ? wv : best
+        }, { center: 9999, sigma: 20 })
         const sOff = nearS.center < 9999 ? nearS.center + 2 * nearS.sigma : qOn + 80
+        const tOff = nearT.center < 9999 ? nearT.center + 2 * nearT.sigma : sOff + 130
         map.push({ id: 'av',      onsetMs: qOn - 80,  offsetMs: qOn,       state: 'active' })
         map.push({ id: 'his',     onsetMs: qOn,       offsetMs: qOn + 20,  state: 'active' })
         map.push({ id: 'rbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
@@ -164,6 +182,8 @@ export function buildConductionMap(rhythmId, waves) {
         map.push({ id: 'rv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
         map.push({ id: 'lv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
         map.push({ id: 'apex',    onsetMs: qOn + 35,  offsetMs: sOff + 20, state: 'active' })
+        map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
+        map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
         if (nearR.center < 9999) map.push({ id: '_rwave', onsetMs: nearR.center, offsetMs: nearR.center, rCenter: nearR.center, rSigma: nearR.sigma, state: 'meta' })
       })
       return map
@@ -175,29 +195,35 @@ export function buildConductionMap(rhythmId, waves) {
       const pWaves = waves.filter(wv => wv.name === 'P')
       const rWaves = waves.filter(wv => wv.name === 'R')
       const sWaves = waves.filter(wv => wv.name === 'S')
+      const tWaves = waves.filter(wv => wv.name === 'T')
       qWaves.forEach((qw, idx) => {
         const qOn   = qw.center - 2 * qw.sigma
         const nearR = rWaves.reduce((b, rv) => Math.abs(rv.center - qw.center) < Math.abs(b.center - qw.center) ? rv : b, { center: 9999, sigma: 12 })
         const nearS = sWaves.reduce((b, sv) => Math.abs(sv.center - qw.center) < Math.abs(b.center - qw.center) ? sv : b, { center: 9999, sigma: 10 })
+        const nearT = tWaves.reduce((b, tv) => Math.abs(tv.center - qw.center) < Math.abs(b.center - qw.center) ? tv : b, { center: 9999, sigma: 20 })
         const sOff  = nearS.center < 9999 ? nearS.center + 2 * nearS.sigma : qOn + 80
+        const tOff  = nearT.center < 9999 ? nearT.center + 2 * nearT.sigma : sOff + 130
         const isPVC = idx === 3
         if (!isPVC) {
           const nearP = pWaves.reduce((b, pv) => Math.abs(pv.center - qw.center) < Math.abs(b.center - qw.center) ? pv : b, { center: 9999, sigma: 25 })
           if (nearP.center < 9999) {
             const pOn  = nearP.center - 2 * nearP.sigma
             const pOff = nearP.center + 2 * nearP.sigma
-            map.push({ id: 'sa',      onsetMs: pOn,      offsetMs: pOn + 40, state: 'active' })
-            map.push({ id: 'ra',      onsetMs: pOn + 10, offsetMs: pOff,     state: 'active' })
-            map.push({ id: 'la',      onsetMs: pOn + 25, offsetMs: pOff,     state: 'active' })
-            map.push({ id: 'av',      onsetMs: pOff,     offsetMs: qOn,      state: 'active' })
-            map.push({ id: 'his',     onsetMs: qOn,      offsetMs: qOn + 20, state: 'active' })
-            map.push({ id: 'rbundle', onsetMs: qOn + 10, offsetMs: qOn + 45, state: 'active' })
-            map.push({ id: 'lbundle', onsetMs: qOn + 10, offsetMs: qOn + 45, state: 'active' })
+            map.push({ id: 'sa',       onsetMs: pOn,       offsetMs: pOn + 40, state: 'active' })
+            map.push({ id: 'ra',       onsetMs: pOn + 10,  offsetMs: pOff,     state: 'active' })
+            map.push({ id: 'bachmann', onsetMs: pOn + 12,  offsetMs: pOn + 32, state: 'active' })
+            map.push({ id: 'la',       onsetMs: pOn + 25,  offsetMs: pOff,     state: 'active' })
+            map.push({ id: 'av',       onsetMs: pOff,      offsetMs: qOn,      state: 'active' })
+            map.push({ id: 'his',      onsetMs: qOn,       offsetMs: qOn + 20, state: 'active' })
+            map.push({ id: 'rbundle',  onsetMs: qOn + 10,  offsetMs: qOn + 45, state: 'active' })
+            map.push({ id: 'lbundle',  onsetMs: qOn + 10,  offsetMs: qOn + 45, state: 'active' })
           }
         }
-        map.push({ id: 'rv',   onsetMs: qOn + 20, offsetMs: sOff,      state: isPVC ? 'ectopic' : 'active' })
-        map.push({ id: 'lv',   onsetMs: qOn + 20, offsetMs: sOff,      state: isPVC ? 'ectopic' : 'active' })
-        map.push({ id: 'apex', onsetMs: qOn + 35, offsetMs: sOff + 20, state: isPVC ? 'ectopic' : 'active' })
+        map.push({ id: 'rv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: isPVC ? 'ectopic' : 'active' })
+        map.push({ id: 'lv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: isPVC ? 'ectopic' : 'active' })
+        map.push({ id: 'apex',    onsetMs: qOn + 35,  offsetMs: sOff + 20, state: isPVC ? 'ectopic' : 'active' })
+        map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol' })
+        map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol' })
         if (nearR.center < 9999) map.push({ id: '_rwave', onsetMs: nearR.center, offsetMs: nearR.center, rCenter: nearR.center, rSigma: nearR.sigma, state: 'meta' })
       })
       return map
@@ -208,12 +234,15 @@ export function buildConductionMap(rhythmId, waves) {
       const qWaves = waves.filter(wv => wv.name === 'Q')
       const rWaves = waves.filter(wv => wv.name === 'R')
       const sWaves = waves.filter(wv => wv.name === 'S')
+      const tWaves = waves.filter(wv => wv.name === 'T')
       const pWaves = waves.filter(wv => wv.name === 'P')
       qWaves.forEach((qw, idx) => {
         const qOn   = qw.center - 2 * qw.sigma
         const nearR = rWaves.reduce((b, rv) => Math.abs(rv.center - qw.center) < Math.abs(b.center - qw.center) ? rv : b, { center: 9999, sigma: 12 })
         const nearS = sWaves.reduce((b, sv) => Math.abs(sv.center - qw.center) < Math.abs(b.center - qw.center) ? sv : b, { center: 9999, sigma: 10 })
+        const nearT = tWaves.reduce((b, tv) => Math.abs(tv.center - qw.center) < Math.abs(b.center - qw.center) ? tv : b, { center: 9999, sigma: 20 })
         const sOff  = nearS.center < 9999 ? nearS.center + 2 * nearS.sigma : qOn + 80
+        const tOff  = nearT.center < 9999 ? nearT.center + 2 * nearT.sigma : sOff + 130
         const isPAC = idx === 2
         const nearP = pWaves.reduce((b, pv) => Math.abs(pv.center - qw.center) < Math.abs(b.center - qw.center) ? pv : b, { center: 9999, sigma: 25 })
         if (nearP.center < 9999) {
@@ -224,18 +253,21 @@ export function buildConductionMap(rhythmId, waves) {
             map.push({ id: 'ra',           onsetMs: pOn + 15, offsetMs: pOff,     state: 'ectopic' })
             map.push({ id: 'la',           onsetMs: pOn,      offsetMs: pOff,     state: 'ectopic' })
           } else {
-            map.push({ id: 'sa', onsetMs: pOn,      offsetMs: pOn + 40, state: 'active' })
-            map.push({ id: 'ra', onsetMs: pOn + 10, offsetMs: pOff,     state: 'active' })
-            map.push({ id: 'la', onsetMs: pOn + 25, offsetMs: pOff,     state: 'active' })
+            map.push({ id: 'sa',       onsetMs: pOn,       offsetMs: pOn + 40, state: 'active' })
+            map.push({ id: 'ra',       onsetMs: pOn + 10,  offsetMs: pOff,     state: 'active' })
+            map.push({ id: 'bachmann', onsetMs: pOn + 12,  offsetMs: pOn + 32, state: 'active' })
+            map.push({ id: 'la',       onsetMs: pOn + 25,  offsetMs: pOff,     state: 'active' })
           }
           map.push({ id: 'av', onsetMs: pOff, offsetMs: qOn, state: 'active' })
         }
-        map.push({ id: 'his',     onsetMs: qOn,      offsetMs: qOn + 20,  state: 'active' })
-        map.push({ id: 'rbundle', onsetMs: qOn + 10, offsetMs: qOn + 45,  state: 'active' })
-        map.push({ id: 'lbundle', onsetMs: qOn + 10, offsetMs: qOn + 45,  state: 'active' })
-        map.push({ id: 'rv',      onsetMs: qOn + 20, offsetMs: sOff,      state: 'active' })
-        map.push({ id: 'lv',      onsetMs: qOn + 20, offsetMs: sOff,      state: 'active' })
-        map.push({ id: 'apex',    onsetMs: qOn + 35, offsetMs: sOff + 20, state: 'active' })
+        map.push({ id: 'his',     onsetMs: qOn,       offsetMs: qOn + 20,  state: 'active' })
+        map.push({ id: 'rbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
+        map.push({ id: 'lbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
+        map.push({ id: 'rv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
+        map.push({ id: 'lv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
+        map.push({ id: 'apex',    onsetMs: qOn + 35,  offsetMs: sOff + 20, state: 'active' })
+        map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
+        map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
         if (nearR.center < 9999) map.push({ id: '_rwave', onsetMs: nearR.center, offsetMs: nearR.center, rCenter: nearR.center, rSigma: nearR.sigma, state: 'meta' })
       })
       return map
@@ -247,13 +279,15 @@ export function buildConductionMap(rhythmId, waves) {
       const qWaves = waves.filter(wv => wv.name === 'Q')
       const rWaves = waves.filter(wv => wv.name === 'R')
       const sWaves = waves.filter(wv => wv.name === 'S')
+      const tWaves = waves.filter(wv => wv.name === 'T')
       const avStates = ['active', 'delayed', 'blocked_flash']
       pWaves.forEach((pw, idx) => {
         const pOn  = pw.center - 2 * pw.sigma
         const pOff = pw.center + 2 * pw.sigma
-        map.push({ id: 'sa', onsetMs: pOn,      offsetMs: pOn + 40, state: 'active' })
-        map.push({ id: 'ra', onsetMs: pOn + 10, offsetMs: pOff,     state: 'active' })
-        map.push({ id: 'la', onsetMs: pOn + 25, offsetMs: pOff,     state: 'active' })
+        map.push({ id: 'sa',       onsetMs: pOn,       offsetMs: pOn + 40, state: 'active' })
+        map.push({ id: 'ra',       onsetMs: pOn + 10,  offsetMs: pOff,     state: 'active' })
+        map.push({ id: 'bachmann', onsetMs: pOn + 12,  offsetMs: pOn + 32, state: 'active' })
+        map.push({ id: 'la',       onsetMs: pOn + 25,  offsetMs: pOff,     state: 'active' })
         const nearQ = qWaves.reduce((b, qv) => {
           if (qv.center < pw.center) return b
           return (b.center > pw.center && qv.center < b.center) ? qv : b
@@ -262,14 +296,18 @@ export function buildConductionMap(rhythmId, waves) {
           const qOn   = nearQ.center - 2 * nearQ.sigma
           const nearR = rWaves.reduce((b, rv) => Math.abs(rv.center - nearQ.center) < Math.abs(b.center - nearQ.center) ? rv : b, { center: 9999, sigma: 12 })
           const nearS = sWaves.reduce((b, sv) => Math.abs(sv.center - nearQ.center) < Math.abs(b.center - nearQ.center) ? sv : b, { center: 9999, sigma: 10 })
+          const nearT = tWaves.reduce((b, tv) => Math.abs(tv.center - nearQ.center) < Math.abs(b.center - nearQ.center) ? tv : b, { center: 9999, sigma: 20 })
           const sOff  = nearS.center < 9999 ? nearS.center + 2 * nearS.sigma : qOn + 80
-          map.push({ id: 'av',      onsetMs: pOff,     offsetMs: qOn,       state: avStates[idx] ?? 'delayed' })
-          map.push({ id: 'his',     onsetMs: qOn,      offsetMs: qOn + 20,  state: 'active' })
-          map.push({ id: 'rbundle', onsetMs: qOn + 10, offsetMs: qOn + 45,  state: 'active' })
-          map.push({ id: 'lbundle', onsetMs: qOn + 10, offsetMs: qOn + 45,  state: 'active' })
-          map.push({ id: 'rv',      onsetMs: qOn + 20, offsetMs: sOff,      state: 'active' })
-          map.push({ id: 'lv',      onsetMs: qOn + 20, offsetMs: sOff,      state: 'active' })
-          map.push({ id: 'apex',    onsetMs: qOn + 35, offsetMs: sOff + 20, state: 'active' })
+          const tOff  = nearT.center < 9999 ? nearT.center + 2 * nearT.sigma : sOff + 130
+          map.push({ id: 'av',      onsetMs: pOff,      offsetMs: qOn,       state: avStates[idx] ?? 'delayed' })
+          map.push({ id: 'his',     onsetMs: qOn,       offsetMs: qOn + 20,  state: 'active' })
+          map.push({ id: 'rbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
+          map.push({ id: 'lbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
+          map.push({ id: 'rv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
+          map.push({ id: 'lv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
+          map.push({ id: 'apex',    onsetMs: qOn + 35,  offsetMs: sOff + 20, state: 'active' })
+          map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
+          map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
           if (nearR.center < 9999) map.push({ id: '_rwave', onsetMs: nearR.center, offsetMs: nearR.center, rCenter: nearR.center, rSigma: nearR.sigma, state: 'meta' })
         } else if (idx === 3) {
           map.push({ id: 'av', onsetMs: pOff, offsetMs: pOff + 200, state: 'blocked' })
@@ -284,12 +322,14 @@ export function buildConductionMap(rhythmId, waves) {
       const qWaves = waves.filter(wv => wv.name === 'Q')
       const rWaves = waves.filter(wv => wv.name === 'R')
       const sWaves = waves.filter(wv => wv.name === 'S')
+      const tWaves = waves.filter(wv => wv.name === 'T')
       pWaves.forEach((pw, idx) => {
         const pOn  = pw.center - 2 * pw.sigma
         const pOff = pw.center + 2 * pw.sigma
-        map.push({ id: 'sa', onsetMs: pOn,      offsetMs: pOn + 40, state: 'active' })
-        map.push({ id: 'ra', onsetMs: pOn + 10, offsetMs: pOff,     state: 'active' })
-        map.push({ id: 'la', onsetMs: pOn + 25, offsetMs: pOff,     state: 'active' })
+        map.push({ id: 'sa',       onsetMs: pOn,       offsetMs: pOn + 40, state: 'active' })
+        map.push({ id: 'ra',       onsetMs: pOn + 10,  offsetMs: pOff,     state: 'active' })
+        map.push({ id: 'bachmann', onsetMs: pOn + 12,  offsetMs: pOn + 32, state: 'active' })
+        map.push({ id: 'la',       onsetMs: pOn + 25,  offsetMs: pOff,     state: 'active' })
         const nearQ = qWaves.reduce((b, qv) => {
           if (qv.center < pw.center) return b
           return (b.center > pw.center && qv.center < b.center) ? qv : b
@@ -298,14 +338,18 @@ export function buildConductionMap(rhythmId, waves) {
           const qOn   = nearQ.center - 2 * nearQ.sigma
           const nearR = rWaves.reduce((b, rv) => Math.abs(rv.center - nearQ.center) < Math.abs(b.center - nearQ.center) ? rv : b, { center: 9999, sigma: 12 })
           const nearS = sWaves.reduce((b, sv) => Math.abs(sv.center - nearQ.center) < Math.abs(b.center - nearQ.center) ? sv : b, { center: 9999, sigma: 10 })
+          const nearT = tWaves.reduce((b, tv) => Math.abs(tv.center - nearQ.center) < Math.abs(b.center - nearQ.center) ? tv : b, { center: 9999, sigma: 20 })
           const sOff  = nearS.center < 9999 ? nearS.center + 2 * nearS.sigma : qOn + 80
-          map.push({ id: 'av',      onsetMs: pOff,     offsetMs: qOn,       state: 'delayed' })
-          map.push({ id: 'his',     onsetMs: qOn,      offsetMs: qOn + 20,  state: 'active' })
-          map.push({ id: 'rbundle', onsetMs: qOn + 10, offsetMs: qOn + 45,  state: 'active' })
-          map.push({ id: 'lbundle', onsetMs: qOn + 10, offsetMs: qOn + 45,  state: 'active' })
-          map.push({ id: 'rv',      onsetMs: qOn + 20, offsetMs: sOff,      state: 'active' })
-          map.push({ id: 'lv',      onsetMs: qOn + 20, offsetMs: sOff,      state: 'active' })
-          map.push({ id: 'apex',    onsetMs: qOn + 35, offsetMs: sOff + 20, state: 'active' })
+          const tOff  = nearT.center < 9999 ? nearT.center + 2 * nearT.sigma : sOff + 130
+          map.push({ id: 'av',      onsetMs: pOff,      offsetMs: qOn,       state: 'delayed' })
+          map.push({ id: 'his',     onsetMs: qOn,       offsetMs: qOn + 20,  state: 'active' })
+          map.push({ id: 'rbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
+          map.push({ id: 'lbundle', onsetMs: qOn + 10,  offsetMs: qOn + 45,  state: 'active' })
+          map.push({ id: 'rv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
+          map.push({ id: 'lv',      onsetMs: qOn + 20,  offsetMs: sOff,      state: 'active' })
+          map.push({ id: 'apex',    onsetMs: qOn + 35,  offsetMs: sOff + 20, state: 'active' })
+          map.push({ id: 'repolLV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
+          map.push({ id: 'repolRV', onsetMs: sOff + 10, offsetMs: tOff,      state: 'repol'  })
           if (nearR.center < 9999) map.push({ id: '_rwave', onsetMs: nearR.center, offsetMs: nearR.center, rCenter: nearR.center, rSigma: nearR.sigma, state: 'meta' })
         } else if (idx === 2) {
           map.push({ id: 'av', onsetMs: pOff, offsetMs: pOff + 200, state: 'blocked' })
@@ -319,6 +363,7 @@ export function buildConductionMap(rhythmId, waves) {
       const qWave     = waves.find(wv => wv.name === 'Q')
       const rWave     = waves.find(wv => wv.name === 'R')
       const sWave     = waves.find(wv => wv.name === 'S')
+      const tWave     = waves.find(wv => wv.name === 'T')
       const map = []
       if (spikeWave) {
         const spikeOn = spikeWave.center - 2 * spikeWave.sigma
@@ -327,9 +372,12 @@ export function buildConductionMap(rhythmId, waves) {
       if (qWave) {
         const qOn  = qWave.center - 2 * qWave.sigma
         const sOff = sWave ? sWave.center + 2 * sWave.sigma : qOn + 130
-        map.push({ id: 'rv',   onsetMs: qOn + 10, offsetMs: sOff,      state: 'ectopic' })
-        map.push({ id: 'lv',   onsetMs: qOn + 40, offsetMs: sOff + 40, state: 'ectopic' })
-        map.push({ id: 'apex', onsetMs: qOn,       offsetMs: qOn + 30,  state: 'ectopic' })
+        const tOff = tWave ? tWave.center + 2 * tWave.sigma : sOff + 130
+        map.push({ id: 'rv',      onsetMs: qOn + 10,  offsetMs: sOff,      state: 'ectopic' })
+        map.push({ id: 'lv',      onsetMs: qOn + 40,  offsetMs: sOff + 40, state: 'ectopic' })
+        map.push({ id: 'apex',    onsetMs: qOn,        offsetMs: qOn + 30,  state: 'ectopic' })
+        map.push({ id: 'repolLV', onsetMs: sOff + 10,  offsetMs: tOff,     state: 'repol'   })
+        map.push({ id: 'repolRV', onsetMs: sOff + 10,  offsetMs: tOff,     state: 'repol'   })
         if (rWave) map.push({ id: '_rwave', onsetMs: rWave.center, offsetMs: rWave.center, rCenter: rWave.center, rSigma: rWave.sigma, state: 'meta' })
       }
       return map
@@ -341,20 +389,21 @@ export function buildConductionMap(rhythmId, waves) {
 }
 
 // ─── Color / state helpers ────────────────────────────────────────────────────
+// Colorblind-safe: blue=depol, amber=repol, purple=block (no red-green)
 const STATE_FILL = {
-  active:        '#10b981',
-  delayed:       '#f59e0b',
-  blocked:       '#ef4444',
-  blocked_flash: '#ef4444',
-  ectopic:       '#818cf8',
-  shimmer:       '#10b981',
+  active:        '#3b82f6',  // blue  — depolarization
+  delayed:       '#f59e0b',  // amber — slow conduction
+  blocked:       '#a855f7',  // purple — block
+  blocked_flash: '#a855f7',  // purple — block flash
+  ectopic:       '#818cf8',  // indigo — ectopic focus
+  shimmer:       '#3b82f6',  // blue  — fibrillatory shimmer
+  repol:         '#f59e0b',  // amber — repolarization
   hidden:        '#1e293b',
   meta:          null,
 }
 const INACTIVE_FILL   = '#1e293b'
 const INACTIVE_STROKE = '#334155'
 
-// ─── Smooth wavefront intensity (0→1 rise, plateau, 1→0 fall) ────────────────
 function computeIntensity(progress) {
   const RISE = 0.40
   const FALL = 0.75
@@ -364,8 +413,7 @@ function computeIntensity(progress) {
   return 1.0
 }
 
-// ─── Stations that get a top-to-bottom clip-rect sweep overlay ────────────────
-// useStroke: true → the overlay path is stroke-based (bundle branches)
+// ─── Depolarization sweep table (top-to-bottom clip rect) ─────────────────────
 const SWEEP_TABLE = {
   la:      { overlayId: 'la_overlay',      clipId: 'la_clipRect',      fullH: 66,  useStroke: false },
   ra:      { overlayId: 'ra_overlay',      clipId: 'ra_clipRect',      fullH: 66,  useStroke: false },
@@ -373,6 +421,12 @@ const SWEEP_TABLE = {
   rv:      { overlayId: 'rv_overlay',      clipId: 'rv_clipRect',      fullH: 133, useStroke: false },
   lbundle: { overlayId: 'lbundle_overlay', clipId: 'lbundle_clipRect', fullH: 51,  useStroke: true  },
   rbundle: { overlayId: 'rbundle_overlay', clipId: 'rbundle_clipRect', fullH: 51,  useStroke: true  },
+}
+
+// ─── Repolarization sweep table (bottom-to-top clip rect — base-to-apex) ──────
+const REPOL_TABLE = {
+  repolLV: { overlayId: 'lv_repol_overlay', clipId: 'lv_repol_clipRect', topY: 95, fullH: 133 },
+  repolRV: { overlayId: 'rv_repol_overlay', clipId: 'rv_repol_clipRect', topY: 95, fullH: 133 },
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -389,7 +443,6 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
 
     const frame = () => {
       const { tInCycle, cycleMs, nativeCycleMs } = clockRef.current
-      // Fix 1: map scaled tInCycle back to native ms so Tier-2 HR changes work
       const tMs = nativeCycleMs !== null
         ? tInCycle * (nativeCycleMs / cycleMs)
         : tInCycle
@@ -397,8 +450,7 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
       const map = mapRef.current
       const els = elRefs.current
 
-      // Reset all sweep overlays to invisible at the start of each frame;
-      // active entries will re-show them below.
+      // Reset all depol sweep overlays
       Object.values(SWEEP_TABLE).forEach(({ overlayId, clipId }) => {
         const ov = els[overlayId]
         const cr = els[clipId]
@@ -406,31 +458,39 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
         if (cr) cr.setAttribute('height', '0')
       })
 
+      // Reset all repol sweep overlays (start at bottom, height=0)
+      Object.values(REPOL_TABLE).forEach(({ overlayId, clipId, topY, fullH }) => {
+        const ov = els[overlayId]
+        const cr = els[clipId]
+        if (ov) ov.style.opacity = '0'
+        if (cr) {
+          cr.setAttribute('y', String(topY + fullH))
+          cr.setAttribute('height', '0')
+        }
+      })
+
       const activeIds = new Set()
       let rEnvelope = 0
 
       map.forEach(entry => {
-        // R-wave Gaussian for the contraction scale pulse
         if (entry.state === 'meta') {
           const dt = tMs - entry.rCenter
           rEnvelope = Math.max(rEnvelope, Math.exp(-(dt * dt) / (2 * entry.rSigma * entry.rSigma)))
           return
         }
 
-        // Blocked nodes: persistent colored state, no sweep
         if (entry.state === 'blocked' || entry.state === 'blocked_flash') {
           const el = els[entry.id]
           if (el) {
             const isBundlePath = entry.id === 'lbundle' || entry.id === 'rbundle'
             if (isBundlePath) el.setAttribute('stroke', STATE_FILL.blocked)
             else              el.setAttribute('fill',   STATE_FILL.blocked)
-            el.setAttribute('filter', 'url(#ekg-glow-red)')
+            el.setAttribute('filter', 'url(#ekg-glow-purple)')
             activeIds.add(entry.id + '_blocked')
           }
           return
         }
 
-        // Shimmer nodes (AFib/flutter atria): chaotic opacity on background path
         if (entry.state === 'shimmer') {
           const el = els[entry.id]
           if (!el) return
@@ -447,11 +507,32 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
           return
         }
 
-        // Normal timed activation
         if (tMs >= entry.onsetMs && tMs <= entry.offsetMs) {
           const windowMs  = entry.offsetMs - entry.onsetMs
           const progress  = windowMs > 0 ? (tMs - entry.onsetMs) / windowMs : 1
           const intensity = computeIntensity(progress)
+
+          // Repolarization: bottom-to-top sweep (base-to-apex)
+          if (entry.state === 'repol') {
+            const repDef = REPOL_TABLE[entry.id]
+            if (repDef) {
+              const overlay  = els[repDef.overlayId]
+              const clipRect = els[repDef.clipId]
+              if (clipRect) {
+                const sweepH = repDef.fullH * progress
+                const sweepY = repDef.topY + repDef.fullH - sweepH
+                clipRect.setAttribute('y', String(sweepY))
+                clipRect.setAttribute('height', String(sweepH))
+              }
+              if (overlay) {
+                overlay.style.opacity = intensity
+                overlay.setAttribute('fill', STATE_FILL.repol)
+                overlay.setAttribute('filter', 'url(#ekg-glow-amber)')
+              }
+            }
+            return
+          }
+
           const fill   = STATE_FILL[entry.state] ?? STATE_FILL.active
           const filter = entry.state === 'ectopic' ? 'url(#ekg-glow-indigo)'
                        : entry.state === 'delayed' ? 'url(#ekg-glow-amber)'
@@ -459,7 +540,6 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
 
           const swpDef = SWEEP_TABLE[entry.id]
           if (swpDef) {
-            // Directional sweep: grow clip rect + fade in/out overlay
             const overlay  = els[swpDef.overlayId]
             const clipRect = els[swpDef.clipId]
             if (clipRect) clipRect.setAttribute('height', progress * swpDef.fullH)
@@ -469,12 +549,12 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
               if (swpDef.useStroke) overlay.setAttribute('stroke', fill)
               else                  overlay.setAttribute('fill',   fill)
             }
-            // Background path stays dark (no entry in activeIds → reset loop clears it)
           } else {
-            // Point / small element: opacity ramp only, no sweep
             const el = els[entry.id]
             if (el) {
-              el.setAttribute('fill', fill)
+              // Bachmann's bundle is stroke-based
+              if (entry.id === 'bachmann') el.setAttribute('stroke', fill)
+              else                         el.setAttribute('fill',   fill)
               el.setAttribute('filter', filter)
               el.style.opacity = intensity
               activeIds.add(entry.id)
@@ -483,22 +563,20 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
         }
       })
 
-      // Reset inactive regular elements to dormant appearance
+      // Reset inactive elements to dormant appearance
       Object.entries(els).forEach(([id, el]) => {
         if (!el) return
-        // Overlays and clip rects are managed entirely by the SWEEP reset above
         if (id.endsWith('_overlay') || id.endsWith('_clipRect')) return
-        // Skip if this element was explicitly activated this frame
         if (activeIds.has(id) || activeIds.has(id + '_blocked') || activeIds.has(id + '_shimmer')) return
 
-        const isBundlePath = id === 'lbundle' || id === 'rbundle'
+        const isBundlePath = id === 'lbundle' || id === 'rbundle' || id === 'bachmann'
         if (isBundlePath) el.setAttribute('stroke', INACTIVE_STROKE)
         else              el.setAttribute('fill',   INACTIVE_FILL)
         el.setAttribute('filter', 'none')
         el.style.opacity = '1'
       })
 
-      // Ventricular contraction pulse: subtle scale at R-wave peak
+      // Ventricular contraction pulse
       if (ventGroupRef.current) {
         const scale = 1 + 0.045 * rEnvelope
         ventGroupRef.current.style.transform       = `scale(${scale})`
@@ -519,44 +597,56 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
       <p className="text-xs uppercase tracking-widest text-gray-500 mb-2">Conduction System</p>
       <svg viewBox="0 0 200 260" width="200" height="260" style={{ overflow: 'visible' }}>
         <defs>
-          {/* Glow filters */}
+          {/* Blue glow for depolarization */}
           <filter id="ekg-glow" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
-          <filter id="ekg-glow-red" x="-40%" y="-40%" width="180%" height="180%">
-            <feFlood floodColor="#ef4444" floodOpacity="0.4" result="color" />
+          {/* Purple glow for blocks */}
+          <filter id="ekg-glow-purple" x="-40%" y="-40%" width="180%" height="180%">
+            <feFlood floodColor="#a855f7" floodOpacity="0.4" result="color" />
             <feComposite in="color" in2="SourceGraphic" operator="in" result="tinted" />
             <feGaussianBlur in="tinted" stdDeviation="4" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
+          {/* Amber glow for delayed/repolarization */}
           <filter id="ekg-glow-amber" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
+          {/* Indigo glow for ectopic */}
           <filter id="ekg-glow-indigo" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="4" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
 
-          {/* Clip paths for directional sweep overlays */}
-          <clipPath id="clip-la">
-            <rect ref={ref('la_clipRect')} x="56" y="24" width="44" height="0" />
-          </clipPath>
+          {/* ── Depol clip paths (top-to-bottom) ──
+               Anatomical layout: RA/RV on LEFT (x<100), LA/LV on RIGHT (x>100)
+               Clip rects must match the physical region each element occupies. */}
           <clipPath id="clip-ra">
-            <rect ref={ref('ra_clipRect')} x="100" y="24" width="42" height="0" />
+            <rect ref={ref('ra_clipRect')} x="56" y="24" width="44" height="0" />
           </clipPath>
-          <clipPath id="clip-lv">
-            <rect ref={ref('lv_clipRect')} x="35" y="95" width="70" height="0" />
+          <clipPath id="clip-la">
+            <rect ref={ref('la_clipRect')} x="100" y="24" width="42" height="0" />
           </clipPath>
           <clipPath id="clip-rv">
-            <rect ref={ref('rv_clipRect')} x="100" y="95" width="70" height="0" />
+            <rect ref={ref('rv_clipRect')} x="35" y="95" width="70" height="0" />
           </clipPath>
-          <clipPath id="clip-lbundle">
-            <rect ref={ref('lbundle_clipRect')} x="55" y="119" width="50" height="0" />
+          <clipPath id="clip-lv">
+            <rect ref={ref('lv_clipRect')} x="100" y="95" width="70" height="0" />
           </clipPath>
           <clipPath id="clip-rbundle">
-            <rect ref={ref('rbundle_clipRect')} x="100" y="119" width="50" height="0" />
+            <rect ref={ref('rbundle_clipRect')} x="55" y="119" width="50" height="0" />
+          </clipPath>
+          <clipPath id="clip-lbundle">
+            <rect ref={ref('lbundle_clipRect')} x="100" y="119" width="50" height="0" />
+          </clipPath>
+          {/* Repol clip paths (bottom-to-top, initial y at bottom) */}
+          <clipPath id="clip-rv-repol">
+            <rect ref={ref('rv_repol_clipRect')} x="35" y="228" width="70" height="0" />
+          </clipPath>
+          <clipPath id="clip-lv-repol">
+            <rect ref={ref('lv_repol_clipRect')} x="100" y="228" width="70" height="0" />
           </clipPath>
         </defs>
 
@@ -573,46 +663,61 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
         {/* ── Atrial septum divider ─────────────────────────────────── */}
         <line x1="100" y1="42" x2="100" y2="95" stroke="#1e3a5f" strokeWidth="1" />
 
-        {/* ── Left atrium (background + sweep overlay) ─────────────── */}
-        <path
-          ref={ref('la')}
-          d="M 62 42 Q 62 28 80 26 Q 98 24 98 42 Q 98 75 70 88 Q 58 80 58 65 Z"
-          fill={INACTIVE_FILL}
-          stroke={INACTIVE_STROKE}
-          strokeWidth="1"
-        />
-        <path
-          ref={ref('la_overlay')}
-          d="M 62 42 Q 62 28 80 26 Q 98 24 98 42 Q 98 75 70 88 Q 58 80 58 65 Z"
-          fill={INACTIVE_FILL}
-          stroke="none"
-          clipPath="url(#clip-la)"
-          style={{ opacity: 0 }}
-        />
-
-        {/* ── Right atrium (background + sweep overlay) ────────────── */}
+        {/* ── RIGHT ATRIUM — left side of SVG (patient's right = viewer's left) */}
         <path
           ref={ref('ra')}
-          d="M 102 42 Q 102 24 120 26 Q 138 28 138 42 Q 138 65 130 80 Q 118 88 102 75 Z"
+          d="M 62 42 Q 62 28 80 26 Q 98 24 98 42 Q 98 75 70 88 Q 58 80 58 65 Z"
           fill={INACTIVE_FILL}
           stroke={INACTIVE_STROKE}
           strokeWidth="1"
         />
         <path
           ref={ref('ra_overlay')}
-          d="M 102 42 Q 102 24 120 26 Q 138 28 138 42 Q 138 65 130 80 Q 118 88 102 75 Z"
+          d="M 62 42 Q 62 28 80 26 Q 98 24 98 42 Q 98 75 70 88 Q 58 80 58 65 Z"
           fill={INACTIVE_FILL}
           stroke="none"
           clipPath="url(#clip-ra)"
           style={{ opacity: 0 }}
         />
 
-        {/* ── SA node ──────────────────────────────────────────────── */}
-        <circle ref={ref('sa')} cx="128" cy="30" r="6" fill={INACTIVE_FILL} stroke={INACTIVE_STROKE} strokeWidth="1" />
-        <text x="136" y="34" fontSize="7" fill="#64748b" fontFamily="monospace">SA</text>
+        {/* ── LEFT ATRIUM — right side of SVG ─────────────────────── */}
+        <path
+          ref={ref('la')}
+          d="M 102 42 Q 102 24 120 26 Q 138 28 138 42 Q 138 65 130 80 Q 118 88 102 75 Z"
+          fill={INACTIVE_FILL}
+          stroke={INACTIVE_STROKE}
+          strokeWidth="1"
+        />
+        <path
+          ref={ref('la_overlay')}
+          d="M 102 42 Q 102 24 120 26 Q 138 28 138 42 Q 138 65 130 80 Q 118 88 102 75 Z"
+          fill={INACTIVE_FILL}
+          stroke="none"
+          clipPath="url(#clip-la)"
+          style={{ opacity: 0 }}
+        />
 
-        {/* ── Ectopic atrial focus (PAC source) ────────────────────── */}
-        <circle ref={ref('ectopicFocus')} cx="75" cy="55" r="4" fill={INACTIVE_FILL} stroke="none" />
+        {/* ── SVC stub above SA node (RA is on LEFT) ────────────────── */}
+        <line x1="70" y1="7" x2="70" y2="16" stroke="#334155" strokeWidth="1.5" strokeDasharray="2,2" />
+        <text x="52" y="11" fontSize="6" fill="#475569" fontFamily="monospace">SVC</text>
+
+        {/* ── SA node at high RA / SVC junction (LEFT side) ─────────── */}
+        <circle ref={ref('sa')} cx="70" cy="18" r="6" fill={INACTIVE_FILL} stroke={INACTIVE_STROKE} strokeWidth="1" />
+        <text x="78" y="22" fontSize="7" fill="#64748b" fontFamily="monospace">SA</text>
+
+        {/* ── Bachmann's bundle: RA→LA, travels LEFT to RIGHT ──────── */}
+        <path
+          ref={ref('bachmann')}
+          d="M 76 22 Q 100 20 124 28"
+          fill="none"
+          stroke={INACTIVE_STROKE}
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray="3,2"
+        />
+
+        {/* ── Ectopic atrial focus (PAC — in LA, right side) ────────── */}
+        <circle ref={ref('ectopicFocus')} cx="125" cy="55" r="4" fill={INACTIVE_FILL} stroke="none" />
 
         {/* ── AV node ──────────────────────────────────────────────── */}
         <circle ref={ref('av')} cx="100" cy="97" r="6" fill={INACTIVE_FILL} stroke={INACTIVE_STROKE} strokeWidth="1" />
@@ -625,30 +730,10 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
         {/* ── Ventricular septum ───────────────────────────────────── */}
         <line x1="100" y1="95" x2="100" y2="225" stroke="#1e3a5f" strokeWidth="1" />
 
-        {/* ── Left bundle branch (background + sweep overlay) ──────── */}
-        <path
-          ref={ref('lbundle')}
-          d="M 97 119 Q 80 130 65 148 Q 58 158 62 170"
-          fill="none"
-          stroke={INACTIVE_STROKE}
-          strokeWidth="3"
-          strokeLinecap="round"
-        />
-        <path
-          ref={ref('lbundle_overlay')}
-          d="M 97 119 Q 80 130 65 148 Q 58 158 62 170"
-          fill="none"
-          stroke={INACTIVE_STROKE}
-          strokeWidth="3"
-          strokeLinecap="round"
-          clipPath="url(#clip-lbundle)"
-          style={{ opacity: 0 }}
-        />
-
-        {/* ── Right bundle branch (background + sweep overlay) ─────── */}
+        {/* ── RIGHT BUNDLE BRANCH — left side, toward RV ───────────── */}
         <path
           ref={ref('rbundle')}
-          d="M 103 119 Q 120 130 135 148 Q 142 158 138 170"
+          d="M 97 119 Q 80 130 65 148 Q 58 158 62 170"
           fill="none"
           stroke={INACTIVE_STROKE}
           strokeWidth="3"
@@ -656,7 +741,7 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
         />
         <path
           ref={ref('rbundle_overlay')}
-          d="M 103 119 Q 120 130 135 148 Q 142 158 138 170"
+          d="M 97 119 Q 80 130 65 148 Q 58 158 62 170"
           fill="none"
           stroke={INACTIVE_STROKE}
           strokeWidth="3"
@@ -665,43 +750,81 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
           style={{ opacity: 0 }}
         />
 
+        {/* ── LEFT BUNDLE BRANCH — right side, toward LV ───────────── */}
+        <path
+          ref={ref('lbundle')}
+          d="M 103 119 Q 120 130 135 148 Q 142 158 138 170"
+          fill="none"
+          stroke={INACTIVE_STROKE}
+          strokeWidth="3"
+          strokeLinecap="round"
+        />
+        <path
+          ref={ref('lbundle_overlay')}
+          d="M 103 119 Q 120 130 135 148 Q 142 158 138 170"
+          fill="none"
+          stroke={INACTIVE_STROKE}
+          strokeWidth="3"
+          strokeLinecap="round"
+          clipPath="url(#clip-lbundle)"
+          style={{ opacity: 0 }}
+        />
+
         {/* ── Ventricles (scale group for contraction pulse) ────────── */}
         <g ref={ventGroupRef}>
-          {/* Left ventricle background + sweep overlay */}
-          <path
-            ref={ref('lv')}
-            d="M 58 95 Q 42 110 40 140 Q 38 170 60 190 Q 80 210 100 228
-               Q 98 200 95 175 Q 90 148 88 125 Q 80 105 70 97 Z"
-            fill={INACTIVE_FILL}
-            stroke={INACTIVE_STROKE}
-            strokeWidth="1"
-          />
-          <path
-            ref={ref('lv_overlay')}
-            d="M 58 95 Q 42 110 40 140 Q 38 170 60 190 Q 80 210 100 228
-               Q 98 200 95 175 Q 90 148 88 125 Q 80 105 70 97 Z"
-            fill={INACTIVE_FILL}
-            stroke="none"
-            clipPath="url(#clip-lv)"
-            style={{ opacity: 0 }}
-          />
-
-          {/* Right ventricle background + sweep overlay */}
+          {/* RIGHT VENTRICLE — left side of SVG */}
           <path
             ref={ref('rv')}
-            d="M 142 95 Q 158 110 160 140 Q 162 170 140 190 Q 120 210 100 228
-               Q 102 200 105 175 Q 110 148 112 125 Q 120 105 130 97 Z"
+            d="M 58 95 Q 42 110 40 140 Q 38 170 60 190 Q 80 210 100 228
+               Q 98 200 95 175 Q 90 148 88 125 Q 80 105 70 97 Z"
             fill={INACTIVE_FILL}
             stroke={INACTIVE_STROKE}
             strokeWidth="1"
           />
           <path
             ref={ref('rv_overlay')}
+            d="M 58 95 Q 42 110 40 140 Q 38 170 60 190 Q 80 210 100 228
+               Q 98 200 95 175 Q 90 148 88 125 Q 80 105 70 97 Z"
+            fill={INACTIVE_FILL}
+            stroke="none"
+            clipPath="url(#clip-rv)"
+            style={{ opacity: 0 }}
+          />
+          <path
+            ref={ref('rv_repol_overlay')}
+            d="M 58 95 Q 42 110 40 140 Q 38 170 60 190 Q 80 210 100 228
+               Q 98 200 95 175 Q 90 148 88 125 Q 80 105 70 97 Z"
+            fill={INACTIVE_FILL}
+            stroke="none"
+            clipPath="url(#clip-rv-repol)"
+            style={{ opacity: 0 }}
+          />
+
+          {/* LEFT VENTRICLE — right side of SVG */}
+          <path
+            ref={ref('lv')}
+            d="M 142 95 Q 158 110 160 140 Q 162 170 140 190 Q 120 210 100 228
+               Q 102 200 105 175 Q 110 148 112 125 Q 120 105 130 97 Z"
+            fill={INACTIVE_FILL}
+            stroke={INACTIVE_STROKE}
+            strokeWidth="1"
+          />
+          <path
+            ref={ref('lv_overlay')}
             d="M 142 95 Q 158 110 160 140 Q 162 170 140 190 Q 120 210 100 228
                Q 102 200 105 175 Q 110 148 112 125 Q 120 105 130 97 Z"
             fill={INACTIVE_FILL}
             stroke="none"
-            clipPath="url(#clip-rv)"
+            clipPath="url(#clip-lv)"
+            style={{ opacity: 0 }}
+          />
+          <path
+            ref={ref('lv_repol_overlay')}
+            d="M 142 95 Q 158 110 160 140 Q 162 170 140 190 Q 120 210 100 228
+               Q 102 200 105 175 Q 110 148 112 125 Q 120 105 130 97 Z"
+            fill={INACTIVE_FILL}
+            stroke="none"
+            clipPath="url(#clip-lv-repol)"
             style={{ opacity: 0 }}
           />
 
@@ -718,31 +841,48 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
         {/* ── Pacemaker lead tip ────────────────────────────────────── */}
         <circle ref={ref('pacer')} cx="100" cy="215" r="5" fill={INACTIVE_FILL} stroke="none" />
 
-        {/* ── Labels ───────────────────────────────────────────────── */}
-        <text x="34"  y="150" fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">LV</text>
-        <text x="166" y="150" fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">RV</text>
-        <text x="72"  y="52"  fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">LA</text>
-        <text x="128" y="52"  fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">RA</text>
+        {/* ── Labels: RA/RV on left, LA/LV on right ────────────────── */}
+        <text x="34"  y="150" fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">RV</text>
+        <text x="166" y="150" fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">LV</text>
+        <text x="72"  y="52"  fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">RA</text>
+        <text x="128" y="52"  fontSize="7.5" fill="#475569" fontFamily="monospace" textAnchor="middle">LA</text>
       </svg>
 
       <RhythmBadge rhythmId={rhythmId} />
+
+      {/* Color legend */}
+      <div className="flex gap-3 mt-2">
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: '#3b82f6' }} />
+          <span className="text-gray-500" style={{ fontSize: '10px' }}>Depol</span>
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: '#f59e0b' }} />
+          <span className="text-gray-500" style={{ fontSize: '10px' }}>Repol</span>
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: '#a855f7' }} />
+          <span className="text-gray-500" style={{ fontSize: '10px' }}>Block</span>
+        </span>
+      </div>
     </div>
   )
 }
 
 function RhythmBadge({ rhythmId }) {
   const BADGES = {
-    firstDegreeBlock:   { text: 'Prolonged AV delay',                    color: 'text-amber-400'  },
-    lbbb:               { text: 'Left bundle blocked',                    color: 'text-red-400'    },
-    rbbb:               { text: 'Right bundle blocked',                   color: 'text-red-400'    },
-    thirdDegreeBlock:   { text: 'Complete AV block',                      color: 'text-red-400'    },
-    atrialFlutter:      { text: 'Re-entrant atrial circuit · 2:1 conduction', color: 'text-amber-400'  },
-    atrialFibrillation: { text: 'Chaotic atrial activity',                color: 'text-amber-400'  },
-    pvcs:               { text: 'Ventricular ectopic focus',               color: 'text-indigo-400' },
-    pacs:               { text: 'Atrial ectopic focus',                    color: 'text-indigo-400' },
-    mobitzI:            { text: 'Progressive AV delay → block',            color: 'text-amber-400'  },
-    mobitzII:           { text: 'Sudden AV block (fixed PR)',               color: 'text-red-400'    },
-    ventricularPaced:   { text: 'Pacemaker stimulus',                      color: 'text-indigo-400' },
+    firstDegreeBlock:   { text: 'Prolonged AV delay',                         color: 'text-amber-400'  },
+    lbbb:               { text: 'Left bundle blocked',                         color: 'text-violet-400' },
+    rbbb:               { text: 'Right bundle blocked',                        color: 'text-violet-400' },
+    thirdDegreeBlock:   { text: 'Complete AV block',                           color: 'text-violet-400' },
+    atrialFlutter:      { text: 'Re-entrant atrial circuit · 2:1 conduction',  color: 'text-amber-400'  },
+    atrialFibrillation: { text: 'Chaotic atrial activity',                     color: 'text-amber-400'  },
+    pvcs:               { text: 'Ventricular ectopic focus',                   color: 'text-indigo-400' },
+    pacs:               { text: 'Atrial ectopic focus',                        color: 'text-indigo-400' },
+    mobitzI:            { text: 'Progressive AV delay → block',                color: 'text-amber-400'  },
+    mobitzII:           { text: 'Sudden AV block (fixed PR)',                  color: 'text-violet-400' },
+    ventricularPaced:   { text: 'Pacemaker stimulus',                          color: 'text-indigo-400' },
+    vtach:              { text: 'Ventricular ectopic tachycardia',             color: 'text-indigo-400' },
   }
   const badge = BADGES[rhythmId]
   if (!badge) return null

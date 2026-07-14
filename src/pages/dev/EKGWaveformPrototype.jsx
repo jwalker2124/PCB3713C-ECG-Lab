@@ -51,6 +51,10 @@ const WHAT_TO_WATCH = {
     ' the fine, irregular ripple where a P wave should be, and the QRS complexes landing at constantly-changing intervals with no repeating pattern,',
   ventricularPaced:
     " the sharp, narrow pacer 'spike' immediately preceding each wide, bizarre QRS complex — and the complete absence of any native P wave before it,",
+  vtach:
+    ' the rapid, wide, bizarre QRS complexes with no preceding P waves — every beat is ventricular in origin, and the QRS morphology is completely different from normal conduction,',
+  vfib:
+    ' the chaotic, disorganized electrical activity with no identifiable P waves, QRS complexes, or T waves — there is no coordinated cardiac output during ventricular fibrillation,',
 }
 
 // Draws the faint monitor-style grid: minor lines every 40 ms and every
@@ -94,10 +98,6 @@ function drawGrid(ctx, width, height) {
 // Draws the scrolling trace. The rightmost pixel column is "now"; each
 // column moving left shows a progressively older sample — exactly like a
 // bedside monitor sweeping its trace from right to left.
-//
-// For every pixel column we work out how long ago (in ms) that column
-// represents, subtract that from the current elapsed time to get an actual
-// sample time, and ask the engine what the voltage was at that instant.
 function drawWaveform(ctx, width, height, elapsedMs, cycleMs, waves, leadAxisDeg, nativeCycleMs) {
   const baselineY = height * BASELINE_FRAC
 
@@ -115,6 +115,43 @@ function drawWaveform(ctx, width, height, elapsedMs, cycleMs, waves, leadAxisDeg
   ctx.lineWidth   = 2
   ctx.lineJoin    = 'round'
   ctx.stroke()
+}
+
+// Draws vertical annotation markers (e.g. ⚠ R-on-T) at the correct scroll
+// position. Each annotation is cycle-relative (tMs within the macro-cycle);
+// we find how many ms ago it last occurred and convert to a canvas x-coord.
+function drawAnnotations(ctx, width, height, elapsedMs, cycleMs, annotations) {
+  if (!annotations?.length) return
+  const cyclePos = ((elapsedMs % cycleMs) + cycleMs) % cycleMs
+
+  for (const ann of annotations) {
+    // Age in ms: how long ago did this annotation fire in the current visible window?
+    let ageMs = cyclePos - ann.tMs
+    if (ageMs < 0) ageMs += cycleMs   // fired in previous cycle
+
+    // Draw for every recent occurrence visible in the window
+    while (ageMs < width / PIXELS_PER_MS) {
+      const x = Math.round(width - ageMs * PIXELS_PER_MS)
+      if (x >= 0 && x <= width) {
+        ctx.save()
+        ctx.strokeStyle = '#ef4444'
+        ctx.lineWidth   = 1.5
+        ctx.setLineDash([5, 4])
+        ctx.globalAlpha = 0.75
+        ctx.beginPath()
+        ctx.moveTo(x, 0)
+        ctx.lineTo(x, height)
+        ctx.stroke()
+        ctx.setLineDash([])
+        ctx.globalAlpha = 1
+        ctx.fillStyle = '#ef4444'
+        ctx.font      = 'bold 11px monospace'
+        ctx.fillText(ann.label, Math.max(2, x - 54), 18)
+        ctx.restore()
+      }
+      ageMs += cycleMs   // previous cycle's occurrence
+    }
+  }
 }
 
 /**
@@ -248,6 +285,7 @@ export default function EKGWaveformPrototype() {
       ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT)
       drawGrid(ctx, CANVAS_WIDTH, CANVAS_HEIGHT)
       drawWaveform(ctx, CANVAS_WIDTH, CANVAS_HEIGHT, frozenElapsedMs, cycleMs, rhythm.waves, activeLeadAxisRef.current, nativeCycleMs)
+      drawAnnotations(ctx, CANVAS_WIDTH, CANVAS_HEIGHT, frozenElapsedMs, cycleMs, rhythm.annotations)
 
       animationFrameId = requestAnimationFrame(render)
     }

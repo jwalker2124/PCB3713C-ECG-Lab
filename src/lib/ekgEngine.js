@@ -1,46 +1,55 @@
 // ekgEngine.js
 //
-// The mathematical core of Module 3. Generates EKG voltage values from a
-// "Gaussian-sum" model: each wave (P, Q, R, S, T) is a bell curve with its
-// own height, width, and position in the cardiac cycle. Adding them together
-// produces one heartbeat's worth of waveform — repeat that on a loop and you
-// get a continuously scrolling EKG strip.
+// Rebuilt architecture: each cardiac complex is generated INDEPENDENTLY from
+// physiological parameters. Heart rate controls only the RR interval — how
+// often a complex fires — NOT the shape or duration of any wave component.
 //
-// Reference: Boron & Boulpaep, Medical Physiology — normal sinus rhythm values.
+// Reference: Boron & Boulpaep, Medical Physiology, 3rd ed.
+//   PR interval:  120–200 ms (normal)
+//   QRS duration: < 120 ms  (normal)
+//   QTc (Bazett): ≤ 440 ms  (normal)
+//   QT at 75 bpm: ~380 ms
 
-// ─────────────────────────────────────────────────────────────────────────
-// gaussian — the building block for every wave on the EKG
-//
-//   amplitude : peak height in millivolts (negative = downward deflection,
-//               like the Q and S waves)
-//   center    : the time (ms) within the cycle where the peak occurs
-//   sigma     : standard deviation (ms) — controls how wide the bump is.
-//               About 95% of a Gaussian's area falls within ±2*sigma of its
-//               center, so we use "center ± 2*sigma" as a wave's effective
-//               start/end when measuring intervals like PR and QRS.
-// ─────────────────────────────────────────────────────────────────────────
-function gaussian(tMs, amplitude, center, sigma) {
-  const exponent = -((tMs - center) ** 2) / (2 * sigma ** 2)
-  return amplitude * Math.exp(exponent)
+// ─── Core math ────────────────────────────────────────────────────────────────
+
+function gaussian(t, amplitude, center, sigma) {
+  return amplitude * Math.exp(-((t - center) ** 2) / (2 * sigma ** 2))
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// LEADS — the frontal-plane limb leads, and the axis each one "looks along".
-//
-// This is the hexaxial reference system from cardiology, expressed in the
-// same plain-degrees convention every wave's `axisDeg` (added below) uses:
-// 0° points along Lead I's axis (the patient's left shoulder), and angles
-// increase the same direction the hexaxial system does — toward Lead II,
-// then III, then aVF, sweeping down toward the feet.
-//
-//   Lead I    0°        aVL   -30°
-//   Lead II  60°        aVR  -150°  (equivalently +210°)
-//   Lead III 120°       aVF   90°
-//
-// Whichever lead is "selected" in the simulation supplies its axisDeg here
-// as the second argument to cycleVoltage()/ekgVoltage() — that's the only
-// thing that changes between leads; the underlying rhythm is identical.
-// ─────────────────────────────────────────────────────────────────────────
+function projectionFactor(sourceAxisDeg, leadAxisDeg) {
+  return Math.cos(((sourceAxisDeg - leadAxisDeg) * Math.PI) / 180)
+}
+
+function ekgNoise(tMs) {
+  return (
+    0.012 * Math.sin(tMs * 0.0157 + 1.7) +
+    0.008 * Math.sin(tMs * 0.0421 + 4.1) +
+    0.005 * Math.sin(tMs * 0.1093 + 0.3)
+  )
+}
+
+// Seeded PRNG (mulberry32) — used where we want reproducible-but-realistic
+// chaos without a fixed pattern. Seed once per builder call, not per sample.
+function mulberry32(seed) {
+  let s = seed
+  return function () {
+    s = (s + 0x6D2B79F5) | 0
+    let t = Math.imul(s ^ (s >>> 15), 1 | s)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+export function warpTime(tMs) {
+  return (
+    tMs +
+    30 * Math.sin(tMs * 0.00073 + 0.9) +
+    12 * Math.sin(tMs * 0.00211 + 3.4)
+  )
+}
+
+// ─── Lead system ──────────────────────────────────────────────────────────────
+
 export const LEADS = {
   I:   { id: 'I',   label: 'Lead I',   axisDeg:    0 },
   II:  { id: 'II',  label: 'Lead II',  axisDeg:   60 },
@@ -49,543 +58,716 @@ export const LEADS = {
   aVL: { id: 'aVL', label: 'aVL',      axisDeg:  -30 },
   aVF: { id: 'aVF', label: 'aVF',      axisDeg:   90 },
 }
-
-// Display order for lead selectors — the conventional clinical reading order.
-export const LEAD_ORDER = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF']
-
-// Lead II is the default: its +60° axis is almost exactly the normal QRS
-// axis used below, so it's the lead a normally-conducting heart's main
-// deflection points most directly at — which is exactly why it's the
-// standard "rhythm strip" lead on real bedside monitors. (It's also why
-// switching the default to it leaves this simulation looking essentially
-// identical to the single-lead model these wave values were originally
-// tuned against — see the note on NORMAL_SINUS_WAVES below.)
+export const LEAD_ORDER    = ['I', 'II', 'III', 'aVR', 'aVL', 'aVF']
 export const DEFAULT_LEAD_ID = 'II'
 
-// ─────────────────────────────────────────────────────────────────────────
-// projectionFactor — the single physical law this whole module exists to
-// teach, made concrete: a lead never measures a deflection's "true"
-// strength. It measures that strength's PROJECTION onto the lead's own
-// axis — exactly the vector-projection idea from Physics Foundations
-// (Module 1), now doing real work.
-//
-//   cos(0°)   = 1   → a deflection pointing straight along a lead's axis
-//                     registers at full strength
-//   cos(90°)  = 0   → one pointing perpendicular to the lead is INVISIBLE
-//                     to it — contributes nothing to that lead's trace
-//   cos(180°) = -1  → one pointing the opposite way registers at full
-//                     strength but INVERTED — what reads as a tall positive
-//                     spike in one lead can read as an equally deep negative
-//                     dip in another, purely from the geometry of where
-//                     you're "looking" from. (This is precisely why the
-//                     same heartbeat produces a different-looking trace on
-//                     every lead — nothing about the heart changes; only
-//                     the angle of the observer does.)
-//
-// `sourceAxisDeg` is a deflection's mean electrical axis — the direction its
-// underlying depolarization/repolarization wavefront travels — and
-// `leadAxisDeg` is the axis of the lead doing the looking. Both use the same
-// degree convention as LEADS above, so the difference between them is a
-// meaningful angle to take the cosine of.
-// ─────────────────────────────────────────────────────────────────────────
-function projectionFactor(sourceAxisDeg, leadAxisDeg) {
-  const angleBetweenDeg = sourceAxisDeg - leadAxisDeg
-  return Math.cos((angleBetweenDeg * Math.PI) / 180)
+// ─── Complex timing layout ────────────────────────────────────────────────────
+// From physiological intervals → Gaussian {center, sigma} for each wave.
+// Convention: t=0 is the start of the complex (P wave onset, or isoelectric
+// lead-in if there is no P wave). All values in milliseconds.
+
+function layoutComplex(p) {
+  const {
+    hasPWave    = true,
+    pDuration   = 80,    // ±2σ effective P width
+    prInterval  = 160,   // P onset → QRS onset
+    qrsDuration = 80,    // QRS onset → QRS offset (±2σ of S wave)
+    qtInterval  = 380,   // QRS onset → T wave end (±2σ of T wave)
+    tDuration   = 160,   // ±2σ effective T width
+    qrsLeadIn   = 20,    // isoelectric before QRS when hasPWave=false
+  } = p
+
+  const pSigma = pDuration / 4
+  const tSigma = tDuration / 4
+
+  // Sub-wave sigmas: chosen so Q/R/S overlap naturally within qrsDuration
+  const qSigma = Math.max(3, qrsDuration * 0.09)
+  const rSigma = Math.max(5, qrsDuration * 0.16)
+  const sSigma = Math.max(4, qrsDuration * 0.12)
+
+  const qrsOnset = hasPWave ? prInterval : qrsLeadIn
+
+  return {
+    pCenter:         hasPWave ? pDuration / 2 : null,
+    pSigma,
+    qrsOnset,
+    qCenter:         qrsOnset + qrsDuration * 0.22,
+    qSigma,
+    rCenter:         qrsOnset + qrsDuration * 0.48,
+    rSigma,
+    sCenter:         qrsOnset + qrsDuration * 0.80,
+    sSigma,
+    qrsOffset:       qrsOnset + qrsDuration,
+    tCenter:         qrsOnset + qtInterval - 2 * tSigma,
+    tSigma,
+    complexDuration: qrsOnset + qtInterval + tDuration / 2 + 25,
+  }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// NORMAL_SINUS_WAVES — default shape for a normal sinus rhythm at ~75 bpm
-// (cycle length 800 ms). All times are milliseconds measured from the start
-// of the cycle; all amplitudes are millivolts as they'd appear viewed
-// face-on along their own electrical axis (see `axisDeg` below — these are
-// the numbers projectionFactor scales by lead).
-//
-// These five entries are the whole "personality" of the rhythm — tweak the
-// timing/shape numbers and watch the measured intervals (computed by
-// measureIntervals, below) move toward or away from the normal ranges:
-//
-//   PR interval   120 - 200 ms   →  this model measures ~149 ms
-//   QRS duration  <   120 ms     →  this model measures ~71 ms
-//   QT interval   ~350 - 400 ms at this heart rate → this model measures ~357 ms
-//                 (QT shortens as heart rate rises — Bazett's correction
-//                  predicts ~358 ms at 75 bpm for a "normal" 400 ms QTc)
-//
-// `axisDeg` is new: it's each deflection's mean electrical axis (see LEADS
-// and projectionFactor above for what that means and how it's used). A
-// normal P wave, QRS complex, and T wave each have their own textbook-normal
-// axis — roughly +60°, +60°, and +45° — which is what's used here. Note Q
-// and S keep their NEGATIVE amplitudes despite sharing the QRS's +60° axis:
-// that's intentional and correct. `amplitude`'s sign encodes whether a
-// component points WITH that shared axis (positive, like R) or AGAINST it
-// (negative, like Q and S); projectionFactor handles the rest.
-//
-// These `amplitude` values are calibrated to read at face value through a
-// lead aligned with the relevant axis — i.e. close to full strength on
-// Lead II (+60°, almost exactly the normal QRS axis — see DEFAULT_LEAD_ID
-// above), which is why this still looks like the original single-lead
-// prototype by default. Switch to a different lead and the SAME heartbeat
-// produces a visibly different trace — sometimes smaller, sometimes
-// inverted — purely from the change in viewing angle. Nothing about the
-// rhythm definition changes; only `leadAxisDeg` does.
-// ─────────────────────────────────────────────────────────────────────────
-export const NORMAL_SINUS_WAVES = [
-  { name: 'P', amplitude:  0.15, center:  80, sigma: 25, axisDeg: 60 },
-  { name: 'Q', amplitude: -0.10, center: 195, sigma:  8, axisDeg: 60 },
-  { name: 'R', amplitude:  1.20, center: 213, sigma: 12, axisDeg: 60 },
-  { name: 'S', amplitude: -0.25, center: 230, sigma: 10, axisDeg: 60 },
-  { name: 'T', amplitude:  0.30, center: 440, sigma: 48, axisDeg: 45 },
-]
+// ─── Wave array builder ───────────────────────────────────────────────────────
+// Produces the [{name, amplitude, center, sigma, axisDeg}] array that
+// cycleVoltage / measureIntervals / HeartAnimation all consume.
 
-export const DEFAULT_HEART_RATE_BPM = 75
+function buildWaveArray(params) {
+  const {
+    hasPWave       = true,
+    pAmplitude     = 0.25,
+    pAxis          = 60,
+    qAmplitude     = -0.10,
+    rAmplitude     = 1.50,
+    sAmplitude     = -0.25,
+    qrsAxis        = 60,
+    stElevation    = 0,
+    tAmplitude     = 0.35,
+    tAxis          = 45,
+    hasPacerSpike  = false,
+    spikeAmplitude = 2.50,
+    spikeDuration  = 6,
+    spikeQrsDelay  = 18,
+  } = params
 
-// ─────────────────────────────────────────────────────────────────────────
-// RHYTHMS — the rhythm library (Tier 1: "same engine, different numbers").
-//
-// Each entry is fully self-contained: its own heart rate AND its own wave
-// set. That keeps every rhythm independently tunable and independently
-// checkable with measureIntervals() — no shared state to accidentally break
-// another rhythm while tuning one.
-//
-// These six are all still "one regular, repeating P-QRS-T cycle" — only the
-// timing and shape numbers differ. Rhythms where the cycle itself becomes
-// irregular (2nd/3rd-degree block, AFib, PACs/PVCs, VTach, ...) need a
-// fundamentally different generation strategy and will arrive in a later
-// phase ("Tier 2").
-//
-// NOTE: for the pathological rhythms below, the "abnormal" reading is the
-// whole point — e.g. selecting "1st-degree AV block" SHOULD make the PR
-// interval card read outside the normal range. That's the model correctly
-// reproducing the diagnostic finding, not a bug.
-// ─────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────
-// placeBeat — schedules one beat's waves at an absolute time.
-//
-// `template` is a small array of {name, amplitude, center, sigma} — exactly
-// like the Tier-1 wave sets above — except its `center` values are measured
-// relative to the BEAT's own start, not the cycle's. placeBeat shifts every
-// center by `onsetMs`, producing waves with absolute positions that can be
-// flattened together with other beats into one long array.
-//
-// This is the trick that lets "irregular" rhythms reuse the exact same
-// cycleVoltage()/ekgVoltage() machinery as the regular ones: an irregular
-// rhythm is just a longer "macro-cycle" built by laying several
-// independently-timed, independently-shaped beats end to end. The engine
-// never needs to know it's looking at anything other than a list of Gaussians.
-// ─────────────────────────────────────────────────────────────────────────
-function placeBeat(onsetMs, template) {
-  return template.map(wave => ({ ...wave, center: wave.center + onsetMs }))
-}
-
-// ── Reusable beat templates (centers relative to each beat's own onset) ──
-
-// A normal, narrow P-QRS-T complex — the same shape as NORMAL_SINUS_WAVES,
-// reused as a building block for rhythms that are "mostly normal" beats
-// punctuated by something abnormal (e.g. PVCs).
-const NORMAL_BEAT_TEMPLATE = NORMAL_SINUS_WAVES
-
-// A lone P wave — for rhythms where atrial activity needs to be scheduled
-// independently of (and without regard to) ventricular activity.
-const ATRIAL_P_TEMPLATE = [
-  { name: 'P', amplitude: 0.15, center: 40, sigma: 22, axisDeg: 60 }, // normal P axis
-]
-
-// A wide, low-amplitude QRS-T with a large discordant T wave — the
-// signature of a beat that originates in the ventricle (an "escape" rhythm
-// pacemaker, or an ectopic PVC focus) rather than conducting down from a
-// normal supraventricular impulse through the fast Purkinje network.
-//
-// `axisDeg` here is deliberately far from the normal QRS axis (+60°): an
-// impulse that originates inside the ventricle — rather than spreading down
-// through the normal His-Purkinje pathway — depolarizes the heart along an
-// abnormal route, which is exactly what produces "axis deviation". A
-// leftward/superior axis like this is the textbook finding for ventricular
-// escape rhythms; the T wave's axis sits roughly opposite the QRS's, giving
-// the "discordant T" look real wide-complex beats have.
-const WIDE_VENTRICULAR_QRS_TEMPLATE = [
-  { name: 'Q', amplitude: -0.20, center:   0, sigma: 20, axisDeg: -75 },
-  { name: 'R', amplitude:  0.80, center:  50, sigma: 28, axisDeg: -75 },
-  { name: 'S', amplitude: -0.30, center: 110, sigma: 24, axisDeg: -75 },
-  { name: 'T', amplitude:  0.40, center: 300, sigma: 70, axisDeg: 105 },
-]
-
-// A premature ventricular contraction: even wider and more bizarre than an
-// escape beat (a single dominant deflection rather than distinct Q/R/S),
-// with NO preceding P wave and a tall, sharply discordant (inverted) T wave.
-//
-// Its axis is pushed even further from normal than the escape template's —
-// an "extreme" axis is part of what makes a PVC look so visually alarming
-// against the normal beats around it (and is itself a real diagnostic clue:
-// ectopic ventricular foci can fire from almost anywhere in the ventricle,
-// and the resulting axis can land anywhere on the compass).
-const PVC_TEMPLATE = [
-  { name: 'R', amplitude:  1.30, center:  70, sigma: 35, axisDeg: -100 },
-  { name: 'S', amplitude: -0.50, center: 140, sigma: 30, axisDeg: -100 },
-  { name: 'T', amplitude: -0.35, center: 290, sigma: 55, axisDeg:   80 },
-]
-
-// One "flutter wave" — a small biphasic (up-then-down) blip. A continuous
-// train of these, evenly spaced and overlapping slightly, produces the
-// classic atrial-flutter "sawtooth" baseline in place of discrete P waves.
-// Its axis is given a distinct value of its own — a reentrant circuit racing
-// around the atria isn't depolarizing them the normal way, so there's no
-// reason to expect it to share the normal P wave's axis.
-const FLUTTER_WAVE_TEMPLATE = [
-  { name: 'F', amplitude:  0.12, center: 20, sigma: 12, axisDeg: -15 },
-  { name: 'F', amplitude: -0.10, center: 55, sigma: 14, axisDeg: -15 },
-]
-
-// A normal, narrow QRS-T — used for the conducted beats in atrial flutter
-// AND for both 2nd-degree block rhythms below, since all three involve
-// completely normal ventricular conduction; the trouble lies upstream
-// (in the atria or the AV node), not in the ventricles themselves. Same
-// normal QRS/T axes as NORMAL_SINUS_WAVES, for the same reason.
-const NARROW_QRS_T_TEMPLATE = [
-  { name: 'Q', amplitude: -0.10, center:  15, sigma:  6, axisDeg: 60 },
-  { name: 'R', amplitude:  1.10, center:  28, sigma:  9, axisDeg: 60 },
-  { name: 'S', amplitude: -0.20, center:  42, sigma:  8, axisDeg: 60 },
-  { name: 'T', amplitude:  0.25, center: 140, sigma: 32, axisDeg: 45 },
-]
-
-// A premature ATRIAL contraction's P wave: smaller and narrower than a
-// normal sinus P wave, because it spreads outward from an ectopic atrial
-// focus along a different path through the atria rather than from the SA
-// node — a subtly different "shape" AND a subtly different axis (here +30°
-// instead of the normal +60°), not the absence of a shape (contrast this
-// with PVCs, which have NO P wave at all). The QRS-T that follows is
-// completely normal — conduction below the atria is unaffected — so PACs
-// reuse NORMAL_BEAT_TEMPLATE's Q/R/S/T centers, just with this P wave type.
-const PAC_P_TEMPLATE = [
-  { name: 'P', amplitude: 0.10, center: 30, sigma: 16, axisDeg: 30 },
-]
-
-// ─────────────────────────────────────────────────────────────────────────
-// buildFibrillatoryBaseline — generates the chaotic, undulating baseline of
-// atrial fibrillation: a long run of small, irregularly-spaced "f-wave"
-// bumps standing in for the disorganized electrical static of a fibrillating
-// atrium (no organized depolarization survives to form a real P wave).
-//
-// This has to look chaotic but, like ekgNoise/warpTime above, can't actually
-// BE random — the same "value noise" constraint applies (re-evaluating the
-// same instant on every redraw must always produce the same voltage, or the
-// trace flickers instead of scrolling). So spacing and amplitude are derived
-// from sine functions evaluated at each step's index `i`: the result marches
-// along in a sequence that never lands on a repeating pattern within the
-// length of one macro-cycle, while remaining perfectly reproducible.
-// ─────────────────────────────────────────────────────────────────────────
-function buildFibrillatoryBaseline(durationMs) {
+  const pos   = layoutComplex(params)
   const waves = []
-  let onsetMs = 0
-  let i = 0
-  while (onsetMs < durationMs) {
-    const spacingMs = 90 + 35 * Math.sin(i * 2.39 + 0.7)   // ~55-125 ms apart
-    const amplitude = 0.05 + 0.025 * Math.sin(i * 1.61 + 2.2) // tiny, irregular heights
-    // chaotic per-wavelet axis — fibrillating atrial tissue has no organized
-    // depolarization wavefront, so its net electrical direction wanders
-    // continuously rather than settling on a "P axis" the way healthy atria do
-    const axisDeg = 180 * Math.sin(i * 1.91 + 1.0)
-    waves.push({ name: 'f', amplitude, center: onsetMs, sigma: 7, axisDeg })
-    onsetMs += spacingMs
-    i++
+
+  if (hasPacerSpike) {
+    const spikeSigma  = spikeDuration / 4
+    const spikeCenter = pos.qrsOnset - spikeQrsDelay
+    waves.push({ name: 'Spike', amplitude: spikeAmplitude, center: spikeCenter, sigma: spikeSigma, axisDeg: 0 })
+  }
+
+  if (hasPWave) {
+    waves.push({ name: 'P', amplitude: pAmplitude, center: pos.pCenter, sigma: pos.pSigma, axisDeg: pAxis })
+  }
+
+  waves.push({ name: 'Q', amplitude: qAmplitude, center: pos.qCenter, sigma: pos.qSigma, axisDeg: qrsAxis })
+  waves.push({ name: 'R', amplitude: rAmplitude, center: pos.rCenter, sigma: pos.rSigma, axisDeg: qrsAxis })
+  waves.push({ name: 'S', amplitude: sAmplitude, center: pos.sCenter, sigma: pos.sSigma, axisDeg: qrsAxis })
+  waves.push({ name: 'T', amplitude: tAmplitude, center: pos.tCenter, sigma: pos.tSigma, axisDeg: tAxis })
+
+  if (stElevation !== 0) {
+    const stCenter = pos.qrsOffset + (pos.tCenter - pos.qrsOffset) / 2
+    waves.push({ name: 'ST', amplitude: stElevation, center: stCenter, sigma: 40, axisDeg: qrsAxis })
+  }
+
+  return waves
+}
+
+// ─── generateComplex — the new public API ────────────────────────────────────
+// Returns [{time, voltage}] for one complete PQRST complex.
+// Each wave has its own electrical axis; `leadAxisDeg` sets the viewing lead.
+
+export function generateComplex(params, leadAxisDeg = LEADS.II.axisDeg) {
+  const waves        = buildWaveArray(params)
+  const pos          = layoutComplex(params)
+  const sampleRateMs = params.sampleRateMs ?? 2
+  const points       = []
+
+  for (let t = 0; t <= pos.complexDuration; t += sampleRateMs) {
+    let v = 0
+    for (const w of waves) {
+      v += gaussian(t, w.amplitude, w.center, w.sigma) *
+           projectionFactor(w.axisDeg, leadAxisDeg)
+    }
+    points.push({ time: t, voltage: v })
+  }
+  return points
+}
+
+// complexWaves: exported alias — returns the wave-definition array
+// (used by HeartAnimation, measureIntervals, etc.)
+export function complexWaves(params) {
+  return buildWaveArray(params)
+}
+
+// ─── RHYTHM_PRESETS ───────────────────────────────────────────────────────────
+// Physiologically accurate parameter objects for 16 cardiac rhythms.
+// Simple rhythms (no complexType) produce a single repeating complex.
+// Complex rhythms (complexType set) require macro-cycle builders below.
+
+export const RHYTHM_PRESETS = {
+
+  normalSinus: {
+    label:        'Normal Sinus Rhythm',
+    description:  'Regular SA-node origin, normal AV conduction, all intervals within reference range.',
+    hr:            75,
+    hasPWave:      true,
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    160,
+    qAmplitude:   -0.10,  rAmplitude: 1.50, sAmplitude: -0.25,
+    qrsDuration:   80,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.35,  tDuration: 160,  tAxis:   45,
+    qtInterval:    380,
+  },
+
+  sinusTachycardia: {
+    label:        'Sinus Tachycardia',
+    description:  'Normal SA-node morphology at >100 bpm. QT shortens with rate (Bazett).',
+    hr:            130,
+    hasPWave:      true,
+    pAmplitude:    0.25,  pDuration:  70,  pAxis:   60,
+    prInterval:    140,
+    qAmplitude:   -0.10,  rAmplitude: 1.50, sAmplitude: -0.25,
+    qrsDuration:   75,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.30,  tDuration: 120,  tAxis:   45,
+    qtInterval:    295,    // Bazett: ~295 ms at 130 bpm (QTc ≈ 400 ms)
+  },
+
+  sinusBradycardia: {
+    label:        'Sinus Bradycardia',
+    description:  'Normal SA-node morphology at <60 bpm. QT lengthens with slow rate.',
+    hr:            45,
+    hasPWave:      true,
+    pAmplitude:    0.25,  pDuration:  90,  pAxis:   60,
+    prInterval:    170,
+    qAmplitude:   -0.10,  rAmplitude: 1.50, sAmplitude: -0.25,
+    qrsDuration:   80,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.35,  tDuration: 190,  tAxis:   45,
+    qtInterval:    450,    // Bazett: ~450 ms at 45 bpm
+  },
+
+  firstDegreeBlock: {
+    label:        '1st-Degree AV Block',
+    description:  'Every impulse conducts but with fixed prolonged AV delay. PR > 200 ms by definition.',
+    hr:            75,
+    hasPWave:      true,
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    260,    // diagnostic criterion: >200 ms
+    qAmplitude:   -0.10,  rAmplitude: 1.50, sAmplitude: -0.25,
+    qrsDuration:   80,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.35,  tDuration: 160,  tAxis:   45,
+    qtInterval:    380,
+  },
+
+  lbbb: {
+    label:        'Left Bundle Branch Block',
+    description:  'LV depolarizes cell-to-cell (slow). QRS > 120 ms, left axis deviation, discordant T wave.',
+    hr:            75,
+    hasPWave:      true,
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    160,
+    qAmplitude:   -0.05,  rAmplitude: 1.00, sAmplitude: -0.45,
+    qrsDuration:   145,   qrsAxis:   -45,   // left axis deviation
+    stElevation:  -0.08,
+    tAmplitude:    0.35,  tDuration: 185,  tAxis:  135,  // discordant
+    qtInterval:    450,
+  },
+
+  rbbb: {
+    label:        'Right Bundle Branch Block',
+    description:  'RV depolarizes late via slow myocardial spread. QRS > 120 ms, right axis, discordant T.',
+    hr:            75,
+    hasPWave:      true,
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    160,
+    qAmplitude:   -0.08,  rAmplitude: 0.90, sAmplitude: -0.50,
+    qrsDuration:   140,   qrsAxis:    90,   // right axis deviation
+    stElevation:   0,
+    tAmplitude:    0.30,  tDuration: 175,  tAxis:  -90,  // discordant
+    qtInterval:    430,
+  },
+
+  vtach: {
+    label:        'Ventricular Tachycardia',
+    description:  'Rapid ventricular-origin rhythm. Wide bizarre QRS, no P waves, AV dissociation.',
+    hr:            180,
+    hasPWave:      false,
+    qAmplitude:   -0.15,  rAmplitude: 1.20, sAmplitude: -0.60,
+    qrsDuration:   160,   qrsAxis:  -120,   // extreme axis — ventricular ectopic
+    stElevation:   0,
+    tAmplitude:   -0.50,  tDuration: 140,  tAxis:   60,  // discordant
+    qtInterval:    360,
+    qrsLeadIn:     15,
+  },
+
+  ventricularPaced: {
+    label:        'Ventricular-Paced Rhythm',
+    description:  "Pacemaker drives each beat. Spike → wide QRS (RV apex pacing), discordant T, no native P wave.",
+    hr:            70,
+    hasPWave:      false,
+    hasPacerSpike: true,
+    spikeAmplitude: 2.50,
+    spikeDuration:   6,
+    spikeQrsDelay:  18,
+    qAmplitude:   -0.20,  rAmplitude: 0.85, sAmplitude: -0.30,
+    qrsDuration:   150,   qrsAxis:   -75,
+    stElevation:   0,
+    tAmplitude:    0.40,  tDuration: 200,  tAxis:  105,  // discordant
+    qtInterval:    460,
+    qrsLeadIn:     25,
+  },
+
+  // ── Irregular / macro-cycle rhythms (complexType required) ────────────────
+
+  mobitzI: {
+    label:        'Mobitz I (Wenckebach)',
+    description:  'Progressive PR lengthening until one P wave fails to conduct. Cycle resets. Grouped beating pattern.',
+    complexType:  'mobitzI',
+    atrialRate:    90,
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    // Diminishing PR increments (+80, +30) → RR shortens each beat before drop.
+    // Classic Wenckebach: largest increment first, smaller each successive beat.
+    prIntervals:   [160, 240, 270],   // 4:3 conduction — 3 beats then blocked P
+    qAmplitude:   -0.10,  rAmplitude: 1.20, sAmplitude: -0.25,
+    qrsDuration:   80,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.30,  tDuration: 150,  tAxis:   45,
+    qtInterval:    360,
+  },
+
+  mobitzII: {
+    label:        'Mobitz II',
+    description:  'Fixed PR on conducted beats; sudden dropped QRS without warning. More dangerous than Wenckebach.',
+    complexType:  'mobitzII',
+    atrialRate:    90,
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    160,    // constant — key distinguishing feature from Mobitz I
+    conductionRatio: [2, 1],   // 2:1 — every other P drops (most dramatic pattern)
+    // Slightly wide QRS: Mobitz II block is typically at bundle branch level
+    qAmplitude:   -0.08,  rAmplitude: 1.10, sAmplitude: -0.30,
+    qrsDuration:   120,   qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.28,  tDuration: 150,  tAxis:   45,
+    qtInterval:    380,
+  },
+
+  thirdDegreeBlock: {
+    label:        '3rd-Degree (Complete) AV Block',
+    description:  'Complete AV dissociation. P waves march independently at atrial rate; slow wide ventricular escape.',
+    complexType:  'thirdDegreeBlock',
+    atrialRate:    75,     // independent SA node (~75 bpm)
+    ventricularRate: 32,   // slow idioventricular escape pacemaker (20–40 bpm)
+    pAmplitude:    0.22,  pDuration:  80,  pAxis:   60,
+    // Wide bizarre QRS: ventricular origin, no His-Purkinje conduction
+    // No Q wave (absent in ventricular escapes). Axis: extreme left axis deviation.
+    // qrsAxis -75° → in Lead II: R projects ×cos(-135°)=-0.71 → net complex NEGATIVE
+    rAmplitude:    0.90,  sAmplitude: -0.22,
+    qrsDuration:   180,   qrsAxis:   -75,
+    stElevation:   0,
+    // Discordant T: tAxis 105° → in Lead II projects ×cos(45°)=+0.71 → T POSITIVE
+    // (opposite polarity to the predominantly negative QRS in Lead II)
+    tAmplitude:    0.65,  tDuration: 230,  tAxis:  105,
+    qtInterval:    520,
+  },
+
+  atrialFlutter: {
+    label:        'Atrial Flutter (2:1)',
+    description:  'Reentrant circuit ≈ 300 bpm. Sawtooth flutter waves; every other wave conducts (2:1) → ≈ 150 bpm.',
+    complexType:  'atrialFlutter',
+    flutterRate:         300,
+    ventricularRate:     150,
+    flutterAmplitude:    0.15,
+    flutterAxis:         -15,
+    qAmplitude:   -0.10,  rAmplitude: 1.10, sAmplitude: -0.20,
+    qrsDuration:   75,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.25,  tDuration: 130,  tAxis:   45,
+    qtInterval:    310,
+  },
+
+  atrialFibrillation: {
+    label:        'Atrial Fibrillation',
+    description:  'Chaotic atrial activity. No P waves — fibrillatory baseline. Irregularly irregular ventricular response.',
+    complexType:  'atrialFibrillation',
+    meanVentricularRate:  90,
+    rrVariability:        0.22,    // ±22% deterministic variation around mean RR
+    fibrillatoryAmplitude: 0.07,
+    qAmplitude:   -0.10,  rAmplitude: 1.10, sAmplitude: -0.20,
+    qrsDuration:   75,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.25,  tDuration: 130,  tAxis:   45,
+    qtInterval:    330,
+  },
+
+  pvcs: {
+    label:        'Premature Ventricular Contractions',
+    description:  'Ventricular ectopic beat: wide bizarre QRS, no preceding P, discordant T, fully compensatory pause.',
+    complexType:  'pvcs',
+    sinusRate:     75,
+    multifocal:    true,     // show two different PVC morphologies to simulate different ectopic foci
+    // Normal sinus beat params
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    160,
+    qAmplitude:   -0.10,  rAmplitude: 1.50, sAmplitude: -0.25,
+    qrsDuration:   80,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.35,  tDuration: 160,  tAxis:   45,
+    qtInterval:    380,
+    // Focus 1 PVC params (left ventricular origin)
+    pvcRAmplitude:   1.40,
+    pvcSAmplitude:  -0.55,
+    pvcQrsDuration:  155,
+    pvcQrsAxis:     -100,
+    pvcTAmplitude:  -0.45,   // discordant (opposite polarity to QRS)
+    pvcTAxis:        80,
+    pvcQtInterval:   390,
+    pvcCoupling:     0.65,   // fires at 65% of normal RR (premature)
+    // Focus 2 PVC params (right ventricular origin — different axis/morphology)
+    pvc2RAmplitude:  1.10,
+    pvc2SAmplitude: -0.80,
+    pvc2QrsDuration: 160,
+    pvc2QrsAxis:     130,    // right axis (RV origin)
+    pvc2TAmplitude: -0.35,
+    pvc2TAxis:      -50,
+    pvc2QtInterval:  400,
+    pvc2Coupling:    0.70,   // slightly later coupling than focus 1
+  },
+
+  pacs: {
+    label:        'Premature Atrial Contractions',
+    description:  'Ectopic atrial beat: different P morphology, normal QRS-T, non-compensatory pause.',
+    complexType:  'pacs',
+    sinusRate:     75,
+    // Normal sinus beat params
+    pAmplitude:    0.25,  pDuration:  80,  pAxis:   60,
+    prInterval:    160,
+    qAmplitude:   -0.10,  rAmplitude: 1.50, sAmplitude: -0.25,
+    qrsDuration:   80,    qrsAxis:    60,
+    stElevation:   0,
+    tAmplitude:    0.35,  tDuration: 160,  tAxis:   45,
+    qtInterval:    380,
+    // PAC P wave params (ectopic atrial origin)
+    pacPAmplitude:  0.13,
+    pacPDuration:   60,
+    pacPAxis:       30,     // different axis from normal sinus P (+60°)
+    pacPrInterval:  145,    // slightly shorter PR
+    pacCoupling:    0.72,   // fires at 72% of normal RR
+  },
+
+  vfib: {
+    label:        'Ventricular Fibrillation',
+    description:  'Completely chaotic ventricular electrical activity. No identifiable complexes. Fatal without immediate defibrillation.',
+    complexType:  'vfib',
+    amplitude:     0.6,
+  },
+}
+
+// ─── Macro-cycle builders ─────────────────────────────────────────────────────
+
+function placeBeat(onsetMs, waveArray) {
+  return waveArray.map(w => ({ ...w, center: w.center + onsetMs }))
+}
+
+// Build a QRS-T only template at t=0 from the preset's QRS/T params.
+function qrstTemplate(preset) {
+  const pos = layoutComplex({
+    hasPWave:    false,
+    qrsDuration: preset.qrsDuration,
+    qtInterval:  preset.qtInterval,
+    tDuration:   160,
+    qrsLeadIn:   0,
+  })
+  return [
+    { name: 'Q', amplitude: preset.qAmplitude, center: pos.qCenter, sigma: pos.qSigma, axisDeg: preset.qrsAxis },
+    { name: 'R', amplitude: preset.rAmplitude, center: pos.rCenter, sigma: pos.rSigma, axisDeg: preset.qrsAxis },
+    { name: 'S', amplitude: preset.sAmplitude, center: pos.sCenter, sigma: pos.sSigma, axisDeg: preset.qrsAxis },
+    { name: 'T', amplitude: preset.tAmplitude, center: pos.tCenter, sigma: pos.tSigma, axisDeg: preset.tAxis },
+  ]
+}
+
+function pTemplate(preset) {
+  const sigma = preset.pDuration / 4
+  return [{ name: 'P', amplitude: preset.pAmplitude, center: preset.pDuration / 2, sigma, axisDeg: preset.pAxis }]
+}
+
+function buildMobitzIWaves(preset) {
+  const { atrialRate, prIntervals } = preset
+  const pInterval = 60000 / atrialRate
+  const numP      = prIntervals.length + 1   // +1 for the dropped beat P
+
+  const waves = []
+  for (let i = 0; i < numP; i++)
+    waves.push(...placeBeat(i * pInterval, pTemplate(preset)))
+  for (let i = 0; i < prIntervals.length; i++)
+    waves.push(...placeBeat(i * pInterval + prIntervals[i], qrstTemplate(preset)))
+
+  const cycleMs     = numP * pInterval
+  const heartRateBpm = Math.round((prIntervals.length / numP) * atrialRate)
+  return { waves, cycleMs, heartRateBpm }
+}
+
+function buildMobitzIIWaves(preset) {
+  const { atrialRate, prInterval, conductionRatio = [3, 2] } = preset
+  const [pCount, qrsCount] = conductionRatio
+  const pInterval = 60000 / atrialRate
+
+  const waves = []
+  for (let i = 0; i < pCount; i++)
+    waves.push(...placeBeat(i * pInterval, pTemplate(preset)))
+  for (let i = 0; i < qrsCount; i++)
+    waves.push(...placeBeat(i * pInterval + prInterval, qrstTemplate(preset)))
+
+  const cycleMs      = pCount * pInterval
+  const heartRateBpm = Math.round((qrsCount / pCount) * atrialRate)
+  return { waves, cycleMs, heartRateBpm }
+}
+
+function buildThirdDegreeWaves(preset) {
+  const { atrialRate, ventricularRate } = preset
+  const atrialInterval      = 60000 / atrialRate
+  const ventricularInterval = 60000 / ventricularRate
+  const cycleMs             = Math.round(ventricularInterval * 3)
+
+  // Ventricular escape: no Q wave (absent in myocardial origin beats).
+  // Wide slurred R, discordant T. Both R and T use independent axes so the
+  // discordance is correctly axis-projected across all leads.
+  const tDuration = preset.tDuration ?? 230
+  const escapePos = layoutComplex({
+    hasPWave:    false,
+    qrsDuration: preset.qrsDuration,
+    qtInterval:  preset.qtInterval,
+    tDuration,
+    qrsLeadIn:   0,
+  })
+  const escapeTemplate = [
+    { name: 'R', amplitude: preset.rAmplitude,  center: escapePos.rCenter, sigma: escapePos.rSigma * 1.15, axisDeg: preset.qrsAxis },
+    { name: 'S', amplitude: preset.sAmplitude,  center: escapePos.sCenter, sigma: escapePos.sSigma,        axisDeg: preset.qrsAxis },
+    { name: 'T', amplitude: preset.tAmplitude,  center: escapePos.tCenter, sigma: escapePos.tSigma,        axisDeg: preset.tAxis   },
+  ]
+
+  const waves = []
+  // P waves march independently (0.3 × PP offset so first P isn't at t=0)
+  let pt = atrialInterval * 0.3
+  while (pt < cycleMs) {
+    waves.push(...placeBeat(pt, pTemplate(preset)))
+    pt += atrialInterval
+  }
+  // Ventricular escape beats, phase-shifted so PR varies visibly across beats
+  const escapeStart = ventricularInterval * 0.35
+  for (let i = 0; i < 3; i++)
+    waves.push(...placeBeat(escapeStart + i * ventricularInterval, escapeTemplate))
+
+  return { waves, cycleMs, heartRateBpm: ventricularRate }
+}
+
+function buildAtrialFlutterWaves(preset) {
+  const { flutterRate, ventricularRate, flutterAmplitude, flutterAxis } = preset
+  const flutterInterval     = 60000 / flutterRate     // e.g., 200 ms at 300 bpm
+  const ventricularInterval = 60000 / ventricularRate // e.g., 400 ms at 150 bpm
+  const cycleMs             = ventricularInterval      // one ventricular beat per cycle
+
+  const flutterWave = [
+    { name: 'F', amplitude:  flutterAmplitude,        center: 20, sigma: 12, axisDeg: flutterAxis },
+    { name: 'F', amplitude: -flutterAmplitude * 0.85, center: 55, sigma: 14, axisDeg: flutterAxis },
+  ]
+
+  const waves = []
+  for (let t = 0; t < cycleMs; t += flutterInterval)
+    waves.push(...placeBeat(t, flutterWave))
+  waves.push(...placeBeat(flutterInterval, qrstTemplate(preset)))
+
+  return { waves, cycleMs, heartRateBpm: ventricularRate }
+}
+
+function buildAFibWaves(preset) {
+  const { meanVentricularRate, fibrillatoryAmplitude } = preset
+  const meanRR = 60000 / meanVentricularRate
+
+  // True randomly-irregular RR intervals — baked in at build time so the
+  // macro-cycle is constant within a session but differs each page load.
+  // Physiologic AFib: RR varies ±~35% around the mean, min ~350ms.
+  const numBeats = 24
+  const qrsOnsets = []
+  let t = meanRR * 0.25
+  for (let i = 0; i < numBeats; i++) {
+    qrsOnsets.push(Math.round(t))
+    const jitter = (Math.random() - 0.5) * meanRR * 0.70   // ±35% variation
+    t += Math.max(350, Math.min(1400, meanRR + jitter))
+  }
+  const cycleMs = Math.round(t + meanRR * 0.3)
+
+  // Fibrillatory baseline: 350–600 undulations per minute = every 100–170 ms.
+  // Amplitude ±0.05–0.10 mV, random axis to simulate chaotic atrial activation.
+  const fbWaves = []
+  let ft = 0
+  while (ft < cycleMs) {
+    const spacing = 100 + Math.random() * 70               // 100–170 ms
+    const polarity = Math.random() > 0.5 ? 1 : -1
+    const amp      = polarity * (0.05 + Math.random() * 0.05)  // ±0.05–0.10 mV
+    const axis     = Math.random() * 360 - 180
+    fbWaves.push({ name: 'f', amplitude: amp, center: ft, sigma: 9, axisDeg: axis })
+    ft += spacing
+  }
+
+  const waves = [...fbWaves, ...qrsOnsets.flatMap(onset => placeBeat(onset, qrstTemplate(preset)))]
+  return { waves, cycleMs, heartRateBpm: meanVentricularRate }
+}
+
+function makePvcTemplate(p, rAmp, sAmp, tAmp, qrsDuration, qrsAxis, qtInterval, tAxis) {
+  const pos = layoutComplex({ hasPWave: false, qrsDuration, qtInterval, tDuration: 170, qrsLeadIn: 15 })
+  return [
+    { name: 'R', amplitude: rAmp, center: pos.rCenter, sigma: pos.rSigma, axisDeg: qrsAxis },
+    { name: 'S', amplitude: sAmp, center: pos.sCenter, sigma: pos.sSigma, axisDeg: qrsAxis },
+    { name: 'T', amplitude: tAmp, center: pos.tCenter, sigma: pos.tSigma, axisDeg: tAxis  },
+  ]
+}
+
+function buildPVCsWaves(preset) {
+  const normalRR       = 60000 / preset.sinusRate
+  const normalTemplate = buildWaveArray(preset)
+
+  // Focus 1: unifocal PVC morphology
+  const pvcTemplate1 = makePvcTemplate(
+    preset,
+    preset.pvcRAmplitude,  preset.pvcSAmplitude,  preset.pvcTAmplitude,
+    preset.pvcQrsDuration, preset.pvcQrsAxis,      preset.pvcQtInterval, preset.pvcTAxis
+  )
+  // Focus 2: different axis / amplitude (simulates second ectopic focus)
+  const pvcTemplate2 = makePvcTemplate(
+    preset,
+    preset.pvc2RAmplitude,  preset.pvc2SAmplitude,  preset.pvc2TAmplitude,
+    preset.pvc2QrsDuration, preset.pvc2QrsAxis,      preset.pvc2QtInterval, preset.pvc2TAxis
+  )
+
+  // PVC 1 coupling: e.g. 0.65 × normalRR after beat 3
+  const pvc1FiringMs = normalRR * 2 + normalRR * preset.pvcCoupling
+  // Compensatory pause: next sinus beat resumes on its original schedule (beat 4 = 4×RR)
+  // ∴ interval before PVC + interval after = pvcCoupling×RR + (2-pvcCoupling)×RR = 2×RR ✓
+
+  // R-on-T detection: does PVC fire during the T wave of the preceding beat?
+  const normalPos       = layoutComplex({ hasPWave: true, prInterval: preset.prInterval, qrsDuration: preset.qrsDuration, qtInterval: preset.qtInterval, tDuration: 160 })
+  const beat3Onset      = normalRR * 2
+  const tWaveStart      = beat3Onset + normalPos.tCenter - 2 * normalPos.tSigma
+  const tWaveEnd        = beat3Onset + normalPos.tCenter + 2 * normalPos.tSigma
+  const isROnT          = pvc1FiringMs >= tWaveStart && pvc1FiringMs <= tWaveEnd
+
+  const annotations = isROnT
+    ? [{ tMs: pvc1FiringMs, label: '⚠ R-on-T', type: 'warning' }]
+    : []
+
+  if (!preset.multifocal) {
+    // Unifocal: single PVC in a 5-beat cycle
+    return {
+      waves: [
+        ...placeBeat(0,            normalTemplate),
+        ...placeBeat(normalRR,     normalTemplate),
+        ...placeBeat(normalRR * 2, normalTemplate),
+        ...placeBeat(pvc1FiringMs, pvcTemplate1),
+        ...placeBeat(normalRR * 4, normalTemplate),   // compensatory: resumes original schedule
+      ],
+      cycleMs: normalRR * 5,
+      heartRateBpm: preset.sinusRate,
+      annotations,
+    }
+  }
+
+  // Multifocal: two different PVC morphologies in a longer cycle.
+  // Layout: 3 normal → PVC(focus1, comp pause) → 3 normal → PVC(focus2, comp pause)
+  const pvc2FiringMs = normalRR * 6 + normalRR * preset.pvc2Coupling   // after beat 7 (index 6)
+  const cycleMs      = normalRR * 10   // 10 RR cycle: 3+PVC+comp + 3+PVC+comp
+
+  return {
+    waves: [
+      ...placeBeat(0,                normalTemplate),
+      ...placeBeat(normalRR,         normalTemplate),
+      ...placeBeat(normalRR * 2,     normalTemplate),
+      ...placeBeat(pvc1FiringMs,     pvcTemplate1),
+      ...placeBeat(normalRR * 4,     normalTemplate),  // resumes on schedule
+      ...placeBeat(normalRR * 5,     normalTemplate),
+      ...placeBeat(normalRR * 6,     normalTemplate),
+      ...placeBeat(pvc2FiringMs,     pvcTemplate2),
+      ...placeBeat(normalRR * 8,     normalTemplate),  // compensatory
+      ...placeBeat(normalRR * 9,     normalTemplate),
+    ],
+    cycleMs,
+    heartRateBpm: preset.sinusRate,
+    annotations,
+  }
+}
+
+function buildPACsWaves(preset) {
+  const normalRR = 60000 / preset.sinusRate
+  const normalTemplate = buildWaveArray(preset)
+
+  const pacFiringMs = normalRR * 2 * preset.pacCoupling
+  const pacPSigma   = preset.pacPDuration / 4
+
+  const pacPos = layoutComplex({ hasPWave: true, pDuration: preset.pacPDuration, prInterval: preset.pacPrInterval, qrsDuration: preset.qrsDuration, qtInterval: preset.qtInterval, tDuration: 160 })
+  const pacTemplate = [
+    { name: 'P', amplitude: preset.pacPAmplitude, center: pacPos.pCenter, sigma: pacPSigma, axisDeg: preset.pacPAxis },
+    { name: 'Q', amplitude: preset.qAmplitude, center: pacPos.qCenter, sigma: pacPos.qSigma, axisDeg: preset.qrsAxis },
+    { name: 'R', amplitude: preset.rAmplitude, center: pacPos.rCenter, sigma: pacPos.rSigma, axisDeg: preset.qrsAxis },
+    { name: 'S', amplitude: preset.sAmplitude, center: pacPos.sCenter, sigma: pacPos.sSigma, axisDeg: preset.qrsAxis },
+    { name: 'T', amplitude: preset.tAmplitude, center: pacPos.tCenter, sigma: pacPos.tSigma, axisDeg: preset.tAxis },
+  ]
+
+  // Non-compensatory pause: next sinus beat ≈ one full RR after PAC
+  const nextSinusOnset = pacFiringMs + pacPos.complexDuration + 190
+  const cycleMs        = Math.round(normalRR * 4)
+
+  return {
+    waves: [
+      ...placeBeat(0,            normalTemplate),
+      ...placeBeat(normalRR,     normalTemplate),
+      ...placeBeat(pacFiringMs,  pacTemplate),
+      ...placeBeat(nextSinusOnset, normalTemplate),
+    ],
+    cycleMs,
+    heartRateBpm: preset.sinusRate,
+  }
+}
+
+// VFib: chaotic sum of incommensurate sinusoids (deterministic, no wave array needed)
+export function vfibVoltage(tMs) {
+  const freqs  = [0.023, 0.037, 0.061, 0.089, 0.143, 0.211]
+  const phases = [0.0,   1.2,   2.7,   0.8,   3.9,   1.5  ]
+  const amps   = [1.0,   0.7,   0.8,   0.5,   0.6,   0.4  ]
+  let v = 0
+  for (let i = 0; i < freqs.length; i++)
+    v += amps[i] * Math.sin(tMs * freqs[i] + phases[i])
+  return 0.6 * (v / 3.5) + ekgNoise(tMs) * 3
+}
+
+function buildVFibWaves(cycleMs = 1100) {
+  const waves = []
+  let t = 0, i = 0
+  while (t < cycleMs) {
+    const spacing = 40 + 70 * Math.abs(Math.sin(i * 2.39 + 0.7))
+    const amp     = 0.4 + 0.35 * Math.sin(i * 1.61 + 2.2)
+    const sigma   = 10 + 18 * Math.abs(Math.sin(i * 3.17 + 0.4))
+    waves.push({ name: 'f', amplitude: amp, center: t, sigma, axisDeg: 360 * Math.sin(i * 1.91 + 1.0) })
+    t += spacing; i++
   }
   return waves
 }
 
-export const RHYTHMS = {
-  normalSinus: {
-    id: 'normalSinus',
-    label: 'Normal sinus rhythm',
-    description:
-      'Regular rhythm originating in the SA node at a normal resting rate, with normal conduction through the AV node and ventricles. Every interval falls inside the textbook normal range.',
-    heartRateBpm: 75,
-    waves: NORMAL_SINUS_WAVES,
-  },
+// ─── RHYTHMS — backward-compatible object ─────────────────────────────────────
+// Derived from RHYTHM_PRESETS. Shape is identical to the original RHYTHMS so
+// EKGWaveformPrototype.jsx and HeartAnimation.jsx require no changes.
 
-  sinusTachycardia: {
-    id: 'sinusTachycardia',
-    label: 'Sinus tachycardia',
-    description:
-      'Same SA-node origin and normal conduction pathway as a normal sinus rhythm — just faster (>100 bpm). Every interval compresses, and the QT interval rate-corrects shorter (Bazett).',
-    heartRateBpm: 130,
-    waves: [
-      { name: 'P', amplitude:  0.15, center:  40, sigma: 12, axisDeg: 60 },
-      { name: 'Q', amplitude: -0.10, center: 150, sigma:  6, axisDeg: 60 },
-      { name: 'R', amplitude:  1.20, center: 160, sigma:  8, axisDeg: 60 },
-      { name: 'S', amplitude: -0.25, center: 172, sigma:  7, axisDeg: 60 },
-      { name: 'T', amplitude:  0.30, center: 340, sigma: 35, axisDeg: 45 },
-    ],
-  },
+function presetToRhythm(id, preset) {
+  const base = { id, label: preset.label, description: preset.description ?? '' }
 
-  sinusBradycardia: {
-    id: 'sinusBradycardia',
-    label: 'Sinus bradycardia',
-    description:
-      'Same SA-node origin and normal conduction pathway — just slower (<60 bpm). The extra cycle time shows up mostly as a longer pause between beats (the flat segment between T and the next P).',
-    heartRateBpm: 50,
-    waves: [
-      { name: 'P', amplitude:  0.15, center: 100, sigma: 28, axisDeg: 60 },
-      { name: 'Q', amplitude: -0.10, center: 250, sigma:  9, axisDeg: 60 },
-      { name: 'R', amplitude:  1.20, center: 265, sigma: 12, axisDeg: 60 },
-      { name: 'S', amplitude: -0.25, center: 280, sigma: 11, axisDeg: 60 },
-      { name: 'T', amplitude:  0.30, center: 520, sigma: 65, axisDeg: 45 },
-    ],
-  },
+  if (!preset.complexType) {
+    const measurable = preset.hasPWave !== false   // no PR interval without a P wave
+    return { ...base, heartRateBpm: preset.hr, waves: buildWaveArray(preset), measurable }
+  }
 
-  firstDegreeBlock: {
-    id: 'firstDegreeBlock',
-    label: '1st-degree AV block',
-    description:
-      'Every atrial impulse still reaches the ventricles — but the AV node delays each one more than normal, by a fixed extra amount. The result: a PR interval that is constant from beat to beat, but prolonged beyond 200 ms.',
-    heartRateBpm: 75,
-    waves: [
-      { name: 'P', amplitude:  0.15, center:  80, sigma: 25, axisDeg: 60 },
-      { name: 'Q', amplitude: -0.10, center: 266, sigma:  8, axisDeg: 60 },
-      { name: 'R', amplitude:  1.20, center: 284, sigma: 12, axisDeg: 60 },
-      { name: 'S', amplitude: -0.25, center: 301, sigma: 10, axisDeg: 60 },
-      { name: 'T', amplitude:  0.30, center: 511, sigma: 48, axisDeg: 45 },
-    ],
-  },
+  const builders = {
+    mobitzI:           () => buildMobitzIWaves(preset),
+    mobitzII:          () => buildMobitzIIWaves(preset),
+    thirdDegreeBlock:  () => buildThirdDegreeWaves(preset),
+    atrialFlutter:     () => buildAtrialFlutterWaves(preset),
+    atrialFibrillation:() => buildAFibWaves(preset),
+    pvcs:              () => buildPVCsWaves(preset),
+    pacs:              () => buildPACsWaves(preset),
+    vfib:              () => ({ waves: [], cycleMs: 1100, heartRateBpm: 0 }),
+  }
 
-  // lbbb/rbbb axisDeg values: bundle branch blocks are a textbook cause of
-  // axis deviation — losing the fast Purkinje pathway down one side forces
-  // depolarization to detour through working myocardium, shifting WHICH WAY
-  // the QRS net vector points (not just how long it takes). LBBB classically
-  // drags the QRS axis leftward/superior (-45° here, "left axis deviation");
-  // RBBB commonly shifts it rightward (+90°). Both also show "discordant" T
-  // waves — the abnormal depolarization sequence drags repolarization with
-  // it — so each T axis sits roughly opposite its QRS axis.
-  lbbb: {
-    id: 'lbbb',
-    label: 'Left bundle branch block',
-    description:
-      "The left ventricle can no longer depolarize via the fast Purkinje network — it has to activate slowly, cell-to-cell, which widens the QRS complex beyond 120 ms. (Simplified: a real LBBB also produces a notched/slurred R wave that a five-Gaussian model can't reproduce — the widening is the diagnostic feature this model captures.)",
-    heartRateBpm: 75,
-    waves: [
-      { name: 'P', amplitude:  0.15, center:  80, sigma: 25, axisDeg:  60 },
-      { name: 'Q', amplitude: -0.15, center: 200, sigma: 18, axisDeg: -45 },
-      { name: 'R', amplitude:  1.00, center: 230, sigma: 22, axisDeg: -45 },
-      { name: 'S', amplitude: -0.35, center: 260, sigma: 20, axisDeg: -45 },
-      { name: 'T', amplitude:  0.30, center: 460, sigma: 50, axisDeg: 135 },
-    ],
-  },
+  const build = builders[preset.complexType]
+  if (!build) return { ...base, heartRateBpm: preset.hr ?? 75, waves: [], measurable: false }
 
-  rbbb: {
-    id: 'rbbb',
-    label: 'Right bundle branch block',
-    description:
-      "The right ventricle depolarizes late, again widening the QRS complex beyond 120 ms — typically seen as a broad, slurred terminal S wave on a lateral lead like Lead I. (Simplified: a real RBBB also produces an RSR' \"rabbit-ears\" pattern over the right side of the heart, which a single-lead model can't show.)",
-    heartRateBpm: 75,
-    waves: [
-      { name: 'P', amplitude:  0.15, center:  80, sigma: 25, axisDeg: 60 },
-      { name: 'Q', amplitude: -0.08, center: 195, sigma: 10, axisDeg: 90 },
-      { name: 'R', amplitude:  0.90, center: 218, sigma: 14, axisDeg: 90 },
-      { name: 'S', amplitude: -0.40, center: 255, sigma: 22, axisDeg: 90 },
-      { name: 'T', amplitude:  0.30, center: 450, sigma: 48, axisDeg: -90 },
-    ],
-  },
-
-  // ─────────────────────────────────────────────────────────────────────
-  // Tier 2: irregular rhythms — built from placeBeat() "macro-cycles"
-  //
-  // These rhythms don't repeat one P-QRS-T shape on a fixed schedule; the
-  // whole POINT is that successive beats differ in timing, shape, or both.
-  // So instead of one wave set sampled on a loop, each of these lays out
-  // several independently-timed beats end to end (via placeBeat) and
-  // flattens them into one long `waves` array spanning a longer
-  // "macro-cycle" — which the existing cycleVoltage/ekgVoltage functions
-  // then sample exactly as before, with no changes needed.
-  //
-  // Two new fields appear here:
-  //   cycleMs     — overrides the heart-rate-derived cycle length, since
-  //                 these macro-cycles' true repeat length isn't simply
-  //                 60000 / heartRateBpm (the rate varies beat to beat).
-  //   measurable  — set to `false` to tell the prototype (and eventually
-  //                 Module 3) that measureIntervals()'s "one PR/QRS/QT
-  //                 per cycle" model doesn't apply: these rhythms have
-  //                 multiple/irregular complexes, and that beat-to-beat
-  //                 variability IS the diagnostic finding, not something
-  //                 to average away.
-  // ─────────────────────────────────────────────────────────────────────
-
-  thirdDegreeBlock: {
-    id: 'thirdDegreeBlock',
-    label: '3rd-degree (complete) AV block',
-    description:
-      'No atrial impulse makes it through the AV node at all — the atria and ventricles beat completely independently, each driven by its own pacemaker. P waves continue at a normal atrial rate (~100 bpm here) and "march through" the QRS-T complexes with no fixed relationship, while a slow ventricular escape pacemaker (~33 bpm) fires on its own, producing wide, bizarre QRS complexes. This total dissociation between P waves and QRS complexes — not any single interval — is the diagnostic finding, which is why per-beat PR/QRS/QT numbers aren\'t shown for this rhythm.',
-    heartRateBpm: 33,
-    cycleMs: 1800,
-    measurable: false,
-    waves: [
-      ...placeBeat(60,   ATRIAL_P_TEMPLATE),            // P waves keep marching at their
-      ...placeBeat(660,  ATRIAL_P_TEMPLATE),            // own ~600ms (100bpm) atrial rhythm,
-      ...placeBeat(1260, ATRIAL_P_TEMPLATE),            // oblivious to the ventricles below
-      ...placeBeat(900,  WIDE_VENTRICULAR_QRS_TEMPLATE), // independent escape pacemaker:
-    ],                                                   // one wide QRS per 1800ms cycle (~33bpm)
-  },
-
-  atrialFlutter: {
-    id: 'atrialFlutter',
-    label: 'Atrial flutter (2:1 conduction)',
-    description:
-      'A reentrant electrical circuit races around the atria roughly 300 times per minute, replacing distinct P waves with a continuous, sawtooth "flutter wave" baseline. The AV node can\'t conduct every one of these impulses through to the ventricles — here, every other flutter wave gets through (2:1 conduction), producing a regular ventricular rate of about 150 bpm with normal, narrow QRS complexes riding on top of the sawtooth. Because the underlying atrial activity has no discrete P wave to measure from, per-beat PR/QRS/QT numbers aren\'t shown for this rhythm — the sawtooth baseline itself is the finding.',
-    heartRateBpm: 150,
-    cycleMs: 800,
-    measurable: false,
-    waves: [
-      ...placeBeat(0,   FLUTTER_WAVE_TEMPLATE),     // continuous sawtooth: four flutter
-      ...placeBeat(200, FLUTTER_WAVE_TEMPLATE),     // waves per 800ms cycle ≈ 300 bpm
-      ...placeBeat(400, FLUTTER_WAVE_TEMPLATE),     // atrial rate — the reentrant circuit
-      ...placeBeat(600, FLUTTER_WAVE_TEMPLATE),     // never "rests" between beats
-      ...placeBeat(100, NARROW_QRS_T_TEMPLATE),     // only every OTHER flutter wave
-      ...placeBeat(500, NARROW_QRS_T_TEMPLATE),     // conducts through (2:1) → 150 bpm QRS
-    ],
-  },
-
-  pvcs: {
-    id: 'pvcs',
-    label: 'Premature ventricular contractions (PVCs)',
-    description:
-      'An irritable focus inside the ventricle occasionally fires on its own, ahead of schedule — producing a wide, bizarre complex with no preceding P wave and a tall T wave that points the opposite direction from the QRS ("discordance"). Critically, this ectopic beat does NOT reset the SA node: the atria keep marching to their own regular rhythm underneath, so the next normal sinus beat arrives exactly on the schedule it would have anyway — creating a pause that is precisely twice the normal beat-to-beat interval (a "fully compensatory pause"). Because this rhythm mixes a normal complex with a completely different ectopic one, per-beat PR/QRS/QT numbers aren\'t shown — the contrast between the two shapes, and the pause itself, are the findings to observe.',
-    heartRateBpm: 75,
-    cycleMs: 4000,
-    measurable: false,
-    waves: [
-      ...placeBeat(0,    NORMAL_BEAT_TEMPLATE),  // three normal sinus beats at the
-      ...placeBeat(800,  NORMAL_BEAT_TEMPLATE),  // regular underlying rate (800ms / 75bpm)
-      ...placeBeat(1600, NORMAL_BEAT_TEMPLATE),
-      ...placeBeat(2100, PVC_TEMPLATE),          // PVC fires early — only 500ms after
-                                                 // the last normal beat, with no P wave
-      ...placeBeat(3200, NORMAL_BEAT_TEMPLATE),  // sinus rhythm resumes on its original
-    ],                                           // schedule: 3200 - 1600 = 1600ms = 2 normal
-                                                 // RR intervals → fully compensatory pause
-  },
-
-  pacs: {
-    id: 'pacs',
-    label: 'Premature atrial contractions (PACs)',
-    description:
-      'An ectopic focus elsewhere in the atria occasionally fires early — producing a P wave with a subtly different shape than the sinus P (it spreads outward along a different path through the atria) but a completely normal-looking QRS-T, since conduction below the atria is unaffected. The key contrast with PVCs: this impulse DOES reach and reset the SA node, so the pause that follows is brief and "non-compensatory" — the next sinus beat lands close to its expected time rather than waiting out a full extra cycle. Watch for the early beat\'s slightly different P wave and the shorter-than-PVC pause that follows.',
-    heartRateBpm: 75,
-    cycleMs: 3200,
-    measurable: false,
-    waves: [
-      ...placeBeat(0,    NORMAL_BEAT_TEMPLATE),               // two normal sinus beats at the
-      ...placeBeat(800,  NORMAL_BEAT_TEMPLATE),               // regular underlying rate (800ms)
-      ...placeBeat(1500, PAC_P_TEMPLATE),                     // PAC's P wave fires early — only
-      ...placeBeat(1500 + 145, [                              // 700ms after the last beat — with
-        { name: 'Q', amplitude: -0.10, center: 0,  sigma: 8,  axisDeg: 60 }, // a normal QRS-T riding right behind it
-        { name: 'R', amplitude:  1.20, center: 18, sigma: 12, axisDeg: 60 },
-        { name: 'S', amplitude: -0.25, center: 35, sigma: 10, axisDeg: 60 },
-        { name: 'T', amplitude:  0.30, center: 245, sigma: 48, axisDeg: 45 },
-      ]),
-      ...placeBeat(2400, NORMAL_BEAT_TEMPLATE),               // resumes 900ms later — a brief,
-    ],                                                        // NON-compensatory pause (900ms,
-  },                                                          // not a full 1600ms compensatory one)
-
-  mobitzI: {
-    id: 'mobitzI',
-    label: '2nd-degree AV block — Mobitz I (Wenckebach)',
-    description:
-      "The AV node conducts each successive atrial impulse a little more slowly than the last — the PR interval visibly lengthens, beat after beat — until one impulse finally fails to make it through at all (a P wave with no QRS behind it: a 'dropped' beat). The node then recovers, the next PR interval snaps back to its shortest value, and the whole progressive pattern repeats — a distinctive 'grouped beating' rhythm. That progressive lengthening, visible only by comparing several consecutive beats (never on any single beat alone), is exactly what separates this from Mobitz II.",
-    heartRateBpm: 75,
-    cycleMs: 2400,
-    measurable: false,
-    waves: [
-      // The atria fire on a steady, regular schedule — every 600 ms (100 bpm) —
-      // completely unaware that the AV node below is struggling to keep up:
-      ...placeBeat(0,    ATRIAL_P_TEMPLATE),
-      ...placeBeat(600,  ATRIAL_P_TEMPLATE),
-      ...placeBeat(1200, ATRIAL_P_TEMPLATE),
-      ...placeBeat(1800, ATRIAL_P_TEMPLATE),  // ← conducts to NOTHING: the dropped beat
-      // ...but each one takes longer to conduct through than the last:
-      ...placeBeat(160,  NARROW_QRS_T_TEMPLATE),  // PR ≈ 160 ms (shortest — node just "rested")
-      ...placeBeat(820,  NARROW_QRS_T_TEMPLATE),  // PR ≈ 220 ms (longer...)
-      ...placeBeat(1480, NARROW_QRS_T_TEMPLATE),  // PR ≈ 280 ms (longer still — about to fail)
-      // (the 4th P wave at 1800 has no QRS following — conduction failed completely;
-      //  the cycle then restarts with a short PR again, as if nothing happened)
-    ],
-  },
-
-  mobitzII: {
-    id: 'mobitzII',
-    label: '2nd-degree AV block — Mobitz II',
-    description:
-      "Conducted beats here look completely normal and identical to one another — the PR interval is fixed, with no lengthening and no warning sign of trouble. But every so often, an atrial impulse simply fails to conduct through the AV node at all, and a QRS is dropped without notice (a P wave with nothing behind it). Because there's no progressive PR lengthening to telegraph the coming block — the defining contrast with Mobitz I/Wenckebach — this pattern is considered more dangerous clinically: it can progress to complete heart block suddenly and with little warning.",
-    heartRateBpm: 67,
-    cycleMs: 1800,
-    measurable: false,
-    waves: [
-      // Atria fire on a steady 600ms (100bpm) schedule, same as Wenckebach above —
-      // the difference is entirely in how the AV node responds to them:
-      ...placeBeat(0,    ATRIAL_P_TEMPLATE),
-      ...placeBeat(600,  ATRIAL_P_TEMPLATE),
-      ...placeBeat(1200, ATRIAL_P_TEMPLATE),  // ← conducts to NOTHING: sudden, unannounced drop
-      // The two beats that DO conduct have IDENTICAL PR intervals — no warning:
-      ...placeBeat(160,  NARROW_QRS_T_TEMPLATE),  // PR ≈ 160 ms
-      ...placeBeat(760,  NARROW_QRS_T_TEMPLATE),  // PR ≈ 160 ms — exactly the same as before
-    ],
-  },
-
-  atrialFibrillation: {
-    id: 'atrialFibrillation',
-    label: 'Atrial fibrillation',
-    description:
-      'Multiple chaotic electrical circuits sweep through the atria simultaneously — too disorganized to ever produce a real, repeatable P wave. Instead the baseline becomes a fine, irregular fibrillatory ripple. The AV node, bombarded by this chaos, lets an unpredictable subset of impulses through to the ventricles — producing the hallmark of this rhythm: an "irregularly irregular" ventricular response, where no two beat-to-beat (RR) intervals match and no pattern ever emerges, no matter how long you watch. (Contrast this with atrial flutter\'s 2:1 conduction above — same disorganized atria, but flutter\'s reentrant circuit is at least organized enough to produce a fixed conduction ratio and a regular ventricular rate; AFib has neither.)',
-    heartRateBpm: 90,
-    cycleMs: 4000,
-    measurable: false,
-    waves: [
-      ...buildFibrillatoryBaseline(4000),          // chaotic fibrillatory baseline —
-                                                    // replaces P waves entirely
-      ...placeBeat(50,   NARROW_QRS_T_TEMPLATE),    // QRS complexes land at unpredictable,
-      ...placeBeat(700,  NARROW_QRS_T_TEMPLATE),    // ever-changing intervals — 650, 750,
-      ...placeBeat(1450, NARROW_QRS_T_TEMPLATE),    // 700, 650, 700, 550(wrap) ms — no two
-      ...placeBeat(2150, NARROW_QRS_T_TEMPLATE),    // alike, no pattern, ever
-      ...placeBeat(2800, NARROW_QRS_T_TEMPLATE),
-      ...placeBeat(3500, NARROW_QRS_T_TEMPLATE),
-    ],
-  },
-
-  // ─────────────────────────────────────────────────────────────────────
-  // ventricularPaced — a "device rhythm": not a disturbance the heart's
-  // own conduction system produces, but evidence of a man-made one taking
-  // over for it. Structurally this is actually simpler than the rest of
-  // this Tier-2 section — it's one shape repeating on a steady schedule,
-  // just like the Tier-1 rhythms at the top of this file, with no
-  // placeBeat() macro-cycle needed. It lives down here, and is flagged
-  // `measurable: false`, for a single reason: it has no native P wave for
-  // measureIntervals() to find — the device, not the SA node, launches
-  // every beat — so a "PR interval" simply doesn't exist to measure.
-  // ─────────────────────────────────────────────────────────────────────
-  ventricularPaced: {
-    id: 'ventricularPaced',
-    label: 'Ventricular-paced rhythm (pacemaker)',
-    description:
-      "An implanted pacemaker steps in when the heart's own conduction system can't reliably start or carry a beat. Each one begins with a sharp, narrow 'pacer spike' — the device's electrical stimulus, an artificial signal with no biological counterpart, often barely visible as anything more than a thin vertical tick. Because that impulse starts at the lead's tip (typically in the right ventricle) and has to spread through the heart muscle the slow way — cell to cell, not via the fast Purkinje network — every paced beat produces a wide, bizarre QRS with a discordant T wave, much like a bundle branch block or a PVC. And notice what's missing just as much as what's present: there's no native P wave before it. The device, not the SA node, is what launches every single beat.",
-    heartRateBpm: 70,
-    measurable: false,
-    waves: [
-      // Spike's axisDeg is arbitrary (0°) — it's a man-made electrical
-      // artifact, not a biological deflection, so it has no physiological
-      // "direction" for a lead to project; Q/R/S get a leftward axis (-75°)
-      // typical of pacing from a right-ventricular-apex lead tip, and T is
-      // discordant (roughly opposite the QRS axis), same convention as the
-      // other wide-complex rhythms above (lbbb, rbbb, pvcs).
-      { name: 'Spike', amplitude:  2.50, center: 190, sigma:  2, axisDeg:    0 }, // the pacer artifact: tall,
-                                                                    // razor-narrow — nothing
-                                                                    // the heart itself produces
-                                                                    // looks like this
-      { name: 'Q',     amplitude: -0.20, center: 215, sigma: 18, axisDeg: -75 }, // wide ventricular complex —
-      { name: 'R',     amplitude:  0.85, center: 260, sigma: 26, axisDeg: -75 }, // slow cell-to-cell spread,
-      { name: 'S',     amplitude: -0.30, center: 315, sigma: 22, axisDeg: -75 }, // not fast Purkinje conduction
-      { name: 'T',     amplitude:  0.40, center: 500, sigma: 65, axisDeg:  105 }, // — and a discordant T wave
-    ],                                                              // (no P wave precedes any of it)
-  },
+  const { waves, cycleMs, heartRateBpm } = build()
+  return { ...base, heartRateBpm, cycleMs, waves, measurable: false }
 }
 
-// Display order for selectors — independent of object-key iteration order,
-// and groups related rhythms together (normal → rate variants → conduction
-// defects → irregular/Tier-2 rhythms).
+export const RHYTHMS = Object.fromEntries(
+  Object.entries(RHYTHM_PRESETS).map(([id, preset]) => [id, presetToRhythm(id, preset)])
+)
+
 export const RHYTHM_ORDER = [
   'normalSinus',
   'firstDegreeBlock',
@@ -599,163 +781,165 @@ export const RHYTHM_ORDER = [
   'mobitzII',
   'atrialFibrillation',
   'ventricularPaced',
+  'vtach',
+  'vfib',
 ]
 
-// Converts a heart rate (beats per minute) into a cycle length (ms).
-// 75 bpm → 800 ms per beat.
+// ─── Utility / legacy API ─────────────────────────────────────────────────────
+
 export function cycleLengthMs(heartRateBpm) {
   return 60000 / heartRateBpm
 }
 
-// Bazett's formula relates the QT interval to heart rate:
-//   QTc = QT / sqrt(RR in seconds)   ⇒   QT = QTc * sqrt(RR in seconds)
-// A "normal" corrected QT (QTc) is roughly 400 ms regardless of rate — but
-// the *raw* QT shortens at fast heart rates and lengthens at slow ones.
-// This gives us a rate-aware expected QT to compare each rhythm against,
-// instead of a single fixed number that's only valid at ~60 bpm.
 export function expectedQtMs(heartRateBpm, qtcMs = 400) {
-  const rrSeconds = cycleLengthMs(heartRateBpm) / 1000
-  return qtcMs * Math.sqrt(rrSeconds)
+  return qtcMs * Math.sqrt(cycleLengthMs(heartRateBpm) / 1000)
 }
 
-// Sums every wave's contribution at a given time within ONE cycle, AS SEEN
-// BY A SPECIFIC LEAD. `waves` is an array of { amplitude, center, sigma,
-// axisDeg } objects (see NORMAL_SINUS_WAVES above for what each means).
-//
-// Each wave's Gaussian envelope — its time-varying magnitude, calculated
-// exactly as before — gets multiplied by a single, TIME-INDEPENDENT
-// projectionFactor before being added to the total. That factor depends only
-// on the angle between where the deflection points (`axisDeg`) and which way
-// the lead is looking (`leadAxisDeg`); because that angle never changes
-// during one deflection, the projection just scales (and possibly inverts)
-// the whole Gaussian shape uniformly — it doesn't distort it.
-//
-// `leadAxisDeg` defaults to Lead I's axis (0°) so any code that doesn't care
-// about leads (e.g. measureIntervals' callers, or a wave with no `axisDeg`
-// of its own) keeps behaving exactly as it did before this function learned
-// about leads at all.
 export function cycleVoltage(tInCycleMs, waves, leadAxisDeg = LEADS.I.axisDeg) {
-  return waves.reduce((total, wave) => {
-    const sourceAxisDeg = wave.axisDeg ?? LEADS.I.axisDeg
-    const envelope      = gaussian(tInCycleMs, wave.amplitude, wave.center, wave.sigma)
-    return total + envelope * projectionFactor(sourceAxisDeg, leadAxisDeg)
+  return waves.reduce((sum, wave) => {
+    const axis = wave.axisDeg ?? LEADS.I.axisDeg
+    return sum + gaussian(tInCycleMs, wave.amplitude, wave.center, wave.sigma) * projectionFactor(axis, leadAxisDeg)
   }, 0)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// "Naturalness" layer — ekgNoise() and warpTime()
-//
-// A textbook-perfect Gaussian sum repeats EXACTLY the same shape on EXACTLY
-// the same schedule forever, which reads as artificial — real hearts aren't
-// metronomes, and real electrical traces aren't perfectly clean. These two
-// helpers add a bit of organic imperfection back in.
-//
-// The constraint that shapes both of them: the canvas does NOT remember
-// previously-drawn pixels and scroll them leftward. Every frame, drawWaveform
-// redraws the ENTIRE visible window from scratch by calling ekgVoltage() at
-// each pixel's corresponding timestamp (see EKGWaveformPrototype.jsx). That
-// means the SAME instant in time gets re-sampled on every single frame as it
-// crosses the canvas. If ekgVoltage() returned something different each time
-// for the same `elapsedMs` — e.g. by calling Math.random() — the trace would
-// "boil": every redraw would jitter the already-drawn portion of the strip
-// instead of smoothly scrolling it.
-//
-// So instead of true randomness, both helpers use a classic "value noise"
-// trick: sum a handful of sine waves whose frequencies share no common
-// factor. The combined wave never repeats on any human timescale and looks
-// organic and irregular — but for any given `tMs`, it always evaluates to
-// exactly the same number. That keeps ekgVoltage a pure function of time,
-// which is what makes the whole engine scrubbable and synchronizable in the
-// first place (see the file header and ekgVoltage's own comment below).
-// ─────────────────────────────────────────────────────────────────────────
-
-// A small amount of high-frequency "fuzz" riding on top of the clean signal —
-// the everyday texture every real EKG trace has from muscle tremor, electrode
-// contact, and tiny ambient interference. Amplitudes are in millivolts and
-// deliberately tiny (this should read as "texture", not "static").
-function ekgNoise(tMs) {
-  return (
-    0.012 * Math.sin(tMs * 0.0157 + 1.7) +
-    0.008 * Math.sin(tMs * 0.0421 + 4.1) +
-    0.005 * Math.sin(tMs * 0.1093 + 0.3)
-  )
-}
-
-// Nudges the time axis forward and backward by a few tens of milliseconds,
-// drifting slowly and irregularly over many seconds. Feeding this "warped"
-// time into the cycle sampler — instead of raw elapsed time — is what makes
-// beat-to-beat spacing breathe in and out rather than land on the exact same
-// millisecond every cycle: real heart rate is never perfectly constant, even
-// at rest (this is "heart rate variability" — part reflex, part just the
-// natural noisiness of a biological pacemaker).
-//
-// The wobble amplitude (~±40 ms total) is deliberately small relative to even
-// the shortest clinically-meaningful interval (a PR interval is ~150 ms) —
-// enough to feel "alive" without smearing the carefully-tuned wave shapes, or
-// distorting the deliberate timing relationships baked into the Tier-2
-// macro-cycles (e.g. a PVC's compensatory pause).
-export function warpTime(tMs) {
-  return (
-    tMs +
-    30 * Math.sin(tMs * 0.00073 + 0.9) +
-    12 * Math.sin(tMs * 0.00211 + 3.4)
-  )
-}
-
-// The function the scrolling strip calls every frame: voltage (mV) at any
-// elapsed time, looping the single-cycle waveform forever via the modulo
-// operator. `waves` are defined relative to one cycle of length `cycleMs`,
-// and `leadAxisDeg` (passed straight through to cycleVoltage — see its
-// comment for the lead-projection math) selects which lead is "looking".
-//
-// The double-modulo (`((x % n) + n) % n`) keeps the result positive even
-// when elapsedMs is negative — handy if we ever scrub the strip backwards.
-//
-// Two "naturalness" touches are layered on here (see the big comment block
-// above for why both have to be deterministic functions of time rather than
-// genuinely random): warpTime() nudges WHERE in the cycle we sample from, so
-// beat timing drifts slightly rather than repeating like a metronome, and
-// ekgNoise() adds a bit of organic fuzz on top of the clean summed voltage.
-// (Noise is added AFTER projection — it represents ambient electrical
-// interference picked up at the electrode, not a real cardiac source with
-// its own axis, so every lead picks up the same texture.)
-// `nativeCycleMs` is provided when the caller has scaled `cycleMs` away from
-// the rhythm's original (native) length — e.g. the HR slider sped up a Tier-2
-// macro-cycle rhythm. In that case we also scale the time position within the
-// cycle so all beats compress/expand proportionally rather than the last beats
-// getting clipped off. For Tier-1 rhythms (no nativeCycleMs), tInCycle is used
-// as-is.
 export function ekgVoltage(elapsedMs, cycleMs, waves, leadAxisDeg = LEADS.I.axisDeg, nativeCycleMs = null) {
+  // VFib detection: no identifiable waves, just chaos
+  if (!waves || waves.length === 0) return vfibVoltage(elapsedMs)
+
   const warpedMs   = warpTime(elapsedMs)
   const tInCycle   = ((warpedMs % cycleMs) + cycleMs) % cycleMs
-  const tEvaluated = nativeCycleMs !== null
-    ? tInCycle * (nativeCycleMs / cycleMs)  // scale time axis for Tier-2 rate changes
-    : tInCycle
+  const tEvaluated = nativeCycleMs !== null ? tInCycle * (nativeCycleMs / cycleMs) : tInCycle
   return cycleVoltage(tEvaluated, waves, leadAxisDeg) + ekgNoise(elapsedMs)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// measureIntervals — derives the clinically-meaningful intervals (PR, QRS,
-// QT) directly from the wave parameters above, using "center ± 2*sigma" as
-// each wave's onset/offset. This is what lets us tune the five Gaussians by
-// checking printed numbers against the B&B reference ranges instead of
-// just eyeballing the curve.
-//
-// Assumes `waves` contains entries named 'P', 'Q', 'R', 'S', 'T'.
-// ─────────────────────────────────────────────────────────────────────────
 export function measureIntervals(waves) {
-  const byName = Object.fromEntries(waves.map(w => [w.name, w]))
-  const onset  = w => w.center - 2 * w.sigma
-  const offset = w => w.center + 2 * w.sigma
-
+  const byName    = Object.fromEntries(waves.map(w => [w.name, w]))
+  const onset     = w => w.center - 2 * w.sigma
+  const offset    = w => w.center + 2 * w.sigma
   const pOnset    = onset(byName.P)
   const qrsOnset  = onset(byName.Q)
   const qrsOffset = offset(byName.S)
   const tOffset   = offset(byName.T)
-
   return {
     prIntervalMs:  qrsOnset - pOnset,
     qrsDurationMs: qrsOffset - qrsOnset,
     qtIntervalMs:  tOffset - qrsOnset,
   }
+}
+
+// Legacy constant — kept for any imports that reference it directly
+export const NORMAL_SINUS_WAVES = buildWaveArray(RHYTHM_PRESETS.normalSinus)
+export const DEFAULT_HEART_RATE_BPM = 75
+
+// ─── buildRhythmFromParams — live synthesis from UI parameters ────────────────
+// Translates EKGSimulator's parameter controls → {waves, cycleMs, nativeCycleMs}.
+// Lets students derive any rhythm by understanding which parameters produce it,
+// rather than selecting a pre-labelled preset.
+export function buildRhythmFromParams(ui) {
+  const {
+    saNodeRate        = 75,
+    avConductionRatio = 'all',
+    prInterval        = 160,
+    qrsDuration       = 80,
+    qtInterval        = 380,
+    pWaveMode         = 'present',
+    escapeRhythm      = 'none',
+  } = ui
+
+  const PP     = 60000 / saNodeRate
+  const isWide = qrsDuration > 120
+
+  // Base QRS/T params for conducted beats — T becomes discordant when wide QRS
+  const baseQRS = {
+    qAmplitude:  -0.10,
+    rAmplitude:   isWide ? 0.90 : 1.50,
+    sAmplitude:   isWide ? -0.40 : -0.25,
+    qrsDuration,
+    qrsAxis:      60,
+    qtInterval,
+    tDuration:    isWide ? 185 : 160,
+    tAmplitude:   0.35,
+    tAxis:        isWide ? 135 : 45,
+    stElevation:  0,
+  }
+
+  // ── VFib ──────────────────────────────────────────────────────────────────
+  if (pWaveMode === 'fibrillatory' && avConductionRatio === 'none')
+    return { waves: [], cycleMs: 1100, nativeCycleMs: null, measurable: false }
+
+  // ── AFib — saNodeRate controls mean ventricular rate in this mode ─────────
+  if (pWaveMode === 'fibrillatory') {
+    const { waves, cycleMs } = buildAFibWaves({
+      meanVentricularRate: saNodeRate, fibrillatoryAmplitude: 0.07, ...baseQRS,
+    })
+    return { waves, cycleMs, nativeCycleMs: cycleMs, measurable: false }
+  }
+
+  // ── Complete AV block ─────────────────────────────────────────────────────
+  if (avConductionRatio === 'none') {
+    const pWv = pWaveMode === 'present'
+      ? pTemplate({ pAmplitude: 0.25, pDuration: 80, pAxis: 60 }) : []
+
+    if (escapeRhythm === 'none') {
+      const cycleMs = PP * 5
+      const waves = []
+      for (let i = 0; i < 5; i++) waves.push(...placeBeat(i * PP, pWv))
+      return { waves, cycleMs, nativeCycleMs: cycleMs, measurable: false }
+    }
+
+    const isJ    = escapeRhythm === 'junctional'
+    const escRR  = 60000 / (isJ ? 50 : 32)
+    const escPos = layoutComplex({
+      hasPWave:    false,
+      qrsDuration: isJ ? 90  : 180,
+      qtInterval:  isJ ? qtInterval : Math.max(qtInterval, 480),
+      tDuration:   isJ ? 160 : 230,
+      qrsLeadIn:   0,
+    })
+    const escTemplate = [
+      { name: 'R', amplitude: isJ ? 1.10 : 0.90,  center: escPos.rCenter, sigma: escPos.rSigma * (isJ ? 1.0 : 1.15), axisDeg: isJ ?  60 : -75 },
+      { name: 'S', amplitude: isJ ? -0.20 : -0.22, center: escPos.sCenter, sigma: escPos.sSigma,                       axisDeg: isJ ?  60 : -75 },
+      { name: 'T', amplitude: isJ ?  0.28 : 0.65,  center: escPos.tCenter, sigma: escPos.tSigma,                       axisDeg: isJ ?  45 : 105 },
+    ]
+
+    const cycleMs = Math.round(escRR * 3)
+    const waves   = []
+    if (pWv.length) {
+      let pt = PP * 0.3
+      while (pt < cycleMs) { waves.push(...placeBeat(pt, pWv)); pt += PP }
+    }
+    for (let i = 0; i < 3; i++)
+      waves.push(...placeBeat(escRR * 0.35 + i * escRR, escTemplate))
+
+    return { waves, cycleMs, nativeCycleMs: cycleMs, measurable: false }
+  }
+
+  // ── Partial AV block (Mobitz II-style: fixed PR on conducted beats) ───────
+  if (avConductionRatio !== 'all') {
+    const ratioMap   = { '3:2': [3, 2], '2:1': [2, 1], '3:1': [3, 1] }
+    const [pCt, qCt] = ratioMap[avConductionRatio] ?? [2, 1]
+    const cycleMs    = pCt * PP
+    const qrstPos    = layoutComplex({ hasPWave: false, qrsDuration, qtInterval, tDuration: baseQRS.tDuration, qrsLeadIn: 0 })
+    const waves      = []
+
+    if (pWaveMode === 'present')
+      for (let i = 0; i < pCt; i++)
+        waves.push({ name: 'P', amplitude: 0.25, center: i * PP + 40, sigma: 20, axisDeg: 60 })
+
+    for (let i = 0; i < qCt; i++) {
+      const o = i * PP + prInterval
+      waves.push(
+        { name: 'Q', amplitude: baseQRS.qAmplitude,  center: o + qrstPos.qCenter, sigma: qrstPos.qSigma, axisDeg: 60 },
+        { name: 'R', amplitude: baseQRS.rAmplitude,  center: o + qrstPos.rCenter, sigma: qrstPos.rSigma, axisDeg: 60 },
+        { name: 'S', amplitude: baseQRS.sAmplitude,  center: o + qrstPos.sCenter, sigma: qrstPos.sSigma, axisDeg: 60 },
+        { name: 'T', amplitude: baseQRS.tAmplitude,  center: o + qrstPos.tCenter, sigma: qrstPos.tSigma, axisDeg: baseQRS.tAxis },
+      )
+    }
+    return { waves, cycleMs, nativeCycleMs: cycleMs, measurable: false }
+  }
+
+  // ── 1:1 conduction ────────────────────────────────────────────────────────
+  const hasPWave = pWaveMode === 'present'
+  const waves    = complexWaves({ hasPWave, pAmplitude: 0.25, pDuration: 80, pAxis: 60, prInterval, ...baseQRS })
+  return { waves, cycleMs: PP, nativeCycleMs: null, measurable: hasPWave }
 }
