@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
-import { ekgVoltage, buildRhythmFromParams } from '../lib/ekgEngine'
+﻿import { useEffect, useRef, useState } from 'react'
+import { ECGVoltage, buildRhythmFromParams } from '../lib/ECGEngine'
 
 // ── Canvas sizes ──────────────────────────────────────────────────────────────
 const BW = 500, BH = 330    // body canvas
-const EW = 500, EH = 110    // ekg strip canvas
+const EW = 500, EH = 110    // ECG strip canvas
 
 // Cardiac dipole origin (center of chest in body canvas coords)
 const CX = 250, CY = 158
@@ -11,10 +11,10 @@ const CX = 250, CY = 158
 // How many px = 1 mV on the body diagram dipole arrow
 const DIPOLE_SCALE = 52
 
-// EKG strip constants
+// ECG strip constants
 const PX_MS = 0.20
 const PX_MV = 58
-const BL    = 0.55          // baseline y-fraction in EKG canvas
+const BL    = 0.55          // baseline y-fraction in ECG canvas
 
 // Pre-built rhythm (normal sinus, constant — only lead axis changes)
 const RHYTHM = buildRhythmFromParams({
@@ -137,7 +137,7 @@ function drawGrid(ctx, w, h) {
 // ── Main component ────────────────────────────────────────────────────────────
 export default function LeadPlacementLab() {
   const bodyRef = useRef(null)
-  const ekgRef  = useRef(null)
+  const ECGRef  = useRef(null)
 
   // Live info panel refs (avoid state re-renders)
   const angleRef    = useRef(null)
@@ -160,9 +160,9 @@ export default function LeadPlacementLab() {
 
   useEffect(() => {
     const bodyCanvas = bodyRef.current
-    const ekgCanvas  = ekgRef.current
+    const ECGCanvas  = ECGRef.current
     const bCtx = bodyCanvas.getContext('2d')
-    const eCtx = ekgCanvas.getContext('2d')
+    const eCtx = ECGCanvas.getContext('2d')
     let animId
 
     const { waves, cycleMs, nativeCycleMs } = RHYTHM
@@ -180,8 +180,8 @@ export default function LeadPlacementLab() {
       const leadAxisDeg = Math.atan2(dy, dx) * 180 / Math.PI
 
       // Cardiac vector components (Lead I=x, aVF=y)
-      const Vx = ekgVoltage(tMs, cycleMs, waves, 0,  nativeCycleMs)
-      const Vy = ekgVoltage(tMs, cycleMs, waves, 90, nativeCycleMs)
+      const Vx = ECGVoltage(tMs, cycleMs, waves, 0,  nativeCycleMs)
+      const Vy = ECGVoltage(tMs, cycleMs, waves, 90, nativeCycleMs)
 
       // Dot product = projection of cardiac vector onto lead axis
       const dotProd = Vx * ux + Vy * uy
@@ -332,7 +332,7 @@ export default function LeadPlacementLab() {
         projRef.current.textContent = `${percent}% of max`
       }
 
-      // ── EKG strip ──────────────────────────────────────────────────────
+      // ── ECG strip ──────────────────────────────────────────────────────
       eCtx.clearRect(0, 0, EW, EH)
       eCtx.fillStyle = '#030712'
       eCtx.fillRect(0, 0, EW, EH)
@@ -341,7 +341,7 @@ export default function LeadPlacementLab() {
       const by = EH * BL
       eCtx.beginPath()
       for (let x = 0; x <= EW; x++) {
-        const v = ekgVoltage(elapsed - (EW - x) / PX_MS, cycleMs, waves, leadAxisDeg, nativeCycleMs)
+        const v = ECGVoltage(elapsed - (EW - x) / PX_MS, cycleMs, waves, leadAxisDeg, nativeCycleMs)
         const y = by - v * PX_MV
         if (x === 0) eCtx.moveTo(x, y); else eCtx.lineTo(x, y)
       }
@@ -408,7 +408,7 @@ export default function LeadPlacementLab() {
             <p className="text-xs text-gray-400 leading-relaxed max-w-lg">
               Drag the <span className="text-blue-400 font-semibold">+ (positive)</span> and{' '}
               <span className="text-amber-400 font-semibold">− (negative)</span> electrodes anywhere
-              on the body. The EKG strip updates in real time based on the{' '}
+              on the body. The ECG strip updates in real time based on the{' '}
               <span className="text-white">dot product</span> of the cardiac vector with your lead axis.
             </p>
           </div>
@@ -454,7 +454,7 @@ export default function LeadPlacementLab() {
           <div>
             <p className="text-xs uppercase tracking-widest text-gray-600 mb-2">Physics</p>
             <p className="text-xs text-gray-400 leading-relaxed">
-              The EKG measures the <strong className="text-white">projection</strong> of the cardiac vector onto the lead axis:
+              The ECG measures the <strong className="text-white">projection</strong> of the cardiac vector onto the lead axis:
             </p>
             <p className="text-xs font-mono text-indigo-300 mt-2 text-center">
               V = A·B = |A||B|cosθ
@@ -486,14 +486,14 @@ export default function LeadPlacementLab() {
         </div>
       </div>
 
-      {/* EKG strip */}
+      {/* ECG strip */}
       <div className="border-t border-gray-800">
         <div className="flex items-center gap-3 px-4 pt-3 pb-1">
-          <p className="text-xs uppercase tracking-widest text-gray-600">Live EKG output</p>
+          <p className="text-xs uppercase tracking-widest text-gray-600">Live ECG output</p>
           <p className="text-xs text-gray-700">— amplitude scales with cosθ</p>
         </div>
         <canvas
-          ref={ekgRef}
+          ref={ECGRef}
           width={EW}
           height={EH}
           style={{ width: '100%', maxWidth: EW + 192, display: 'block', backgroundColor: '#030712' }}

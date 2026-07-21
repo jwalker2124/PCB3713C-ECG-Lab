@@ -1,11 +1,11 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+﻿import { createContext, useContext, useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from './AuthContext'
 
 const ModeContext = createContext(null)
 
 // The four modules in the order they appear in Lab Mode
-export const MODULE_ORDER = ['physics', 'cardiac', 'ekg', 'scenarios']
+export const MODULE_ORDER = ['physics', 'cardiac', 'ECG', 'scenarios']
 
 // Metadata for each module (used by Sidebar and ModulePage)
 export const MODULE_INFO = {
@@ -23,12 +23,12 @@ export const MODULE_INFO = {
     labPath:  '/lab/cardiac',
     playPath: '/play/cardiac',
   },
-  ekg: {
-    id: 'ekg',
-    label: 'EKG simulator & rhythms',
+  ECG: {
+    id: 'ECG',
+    label: 'ECG simulator & rhythms',
     number: 3,
-    labPath:  '/lab/ekg',
-    playPath: '/play/ekg',
+    labPath:  '/lab/ECG',
+    playPath: '/play/ECG',
   },
   scenarios: {
     id: 'scenarios',

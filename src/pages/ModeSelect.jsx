@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+﻿import { useNavigate } from 'react-router-dom'
 import { useMode } from '../context/ModeContext'
 
 function ModeCard({ title, subtitle, description, features, accent, onClick }) {
@@ -55,14 +55,14 @@ export default function ModeSelect() {
     >
       <div className="w-full max-w-xl">
         <div className="text-center mb-10">
-          {/* Mini EKG blip */}
+          {/* Mini ECG blip */}
           <div className="flex items-center justify-center gap-2.5 mb-3">
             <svg viewBox="0 0 64 24" className="w-10 h-5" fill="none">
               <polyline points="0,12 10,12 14,3 18,21 22,1 26,23 30,12 64,12"
                 stroke="#10b981" strokeWidth="2"
                 strokeLinecap="round" strokeLinejoin="round" fill="none"/>
             </svg>
-            <span className="text-white font-semibold text-lg">EKG Learning Platform</span>
+            <span className="text-white font-semibold text-lg">ECG Learning Platform</span>
           </div>
           <p className="text-gray-500 text-sm">Choose how you'd like to explore today</p>
         </div>
@@ -71,7 +71,7 @@ export default function ModeSelect() {
           <ModeCard
             title="Lab mode"
             subtitle="Guided — complete in order"
-            description="Work through all four modules sequentially. Each section unlocks the next, building from physics fundamentals to live EKG interpretation to patient diagnosis."
+            description="Work through all four modules sequentially. Each section unlocks the next, building from physics fundamentals to live ECG interpretation to patient diagnosis."
             features={[
               'Modules unlock as you progress',
               'Progress is saved across sessions',

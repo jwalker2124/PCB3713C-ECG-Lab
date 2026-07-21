@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import ModulePage from '../../components/ModulePage'
 import HeartAnimation from '../../components/HeartAnimation'
 import {
   LEADS, LEAD_ORDER,
-  ekgVoltage,
+  ECGVoltage,
   buildRhythmFromParams,
-} from '../../lib/ekgEngine'
+} from '../../lib/ECGEngine'
 
 // ── Canvas config ─────────────────────────────────────────────────────────────
 const CW = 820, CH = 220
@@ -149,7 +149,7 @@ function drawTrace(ctx, w, h, elapsedMs, { waves, cycleMs, nativeCycleMs }, lead
   const byY = h * BL
   ctx.beginPath()
   for (let x = 0; x <= w; x++) {
-    const v = ekgVoltage(elapsedMs - (w - x) / PX_MS, cycleMs, waves, leadAxisDeg, nativeCycleMs)
+    const v = ECGVoltage(elapsedMs - (w - x) / PX_MS, cycleMs, waves, leadAxisDeg, nativeCycleMs)
     const y = byY - v * PX_MV
     if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
   }
@@ -208,7 +208,7 @@ function NoteChip({ level }) {
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
-export default function EKGSimulator() {
+export default function ECGSimulator() {
   const [params, setParams]   = useState(DEFAULT)
   const [leadId, setLeadId]   = useState('II')
   const [animRhythm, setAnimRhythm] = useState(() => buildRhythmFromParams(DEFAULT))
@@ -273,13 +273,13 @@ export default function EKGSimulator() {
 
   return (
     <ModulePage
-      moduleId="ekg"
+      moduleId="ECG"
       number={3}
-      title="EKG Simulator & Rhythm Library"
-      objective="Cardiac arrhythmias are predictable consequences of specific failures in the conduction system. If you know which structure failed, you can derive what the EKG must look like — you don't need to memorise patterns."
-      description="Use the controls below to manipulate each part of the conduction system and watch the EKG strip respond in real time. Load a preset to see the answer, then figure out which parameters produced it."
+      title="ECG Simulator & Rhythm Library"
+      objective="Cardiac arrhythmias are predictable consequences of specific failures in the conduction system. If you know which structure failed, you can derive what the ECG must look like — you don't need to memorise patterns."
+      description="Use the controls below to manipulate each part of the conduction system and watch the ECG strip respond in real time. Load a preset to see the answer, then figure out which parameters produced it."
     >
-      {/* ── EKG strip + conduction animation ─────────────────────────────── */}
+      {/* ── ECG strip + conduction animation ─────────────────────────────── */}
       <div className="rounded-2xl bg-gray-950 border border-gray-800 p-4 mb-4">
         <div className="flex items-center justify-between mb-2.5">
           {/* Lead buttons */}

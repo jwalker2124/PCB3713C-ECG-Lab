@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import {
   RHYTHMS,
   RHYTHM_ORDER,
@@ -6,10 +6,10 @@ import {
   LEAD_ORDER,
   DEFAULT_LEAD_ID,
   cycleLengthMs,
-  ekgVoltage,
+  ECGVoltage,
   measureIntervals,
   warpTime,
-} from '../../lib/ekgEngine'
+} from '../../lib/ECGEngine'
 import HeartAnimation from '../../components/HeartAnimation'
 
 // ── Visual tuning constants ──────────────────────────────────────────────
@@ -21,10 +21,10 @@ const BASELINE_FRAC = 0.6    // baseline (0 mV) sits 60% down the canvas —
                              // leaves headroom above for the tall R wave and
                              // room below for the Q/S dips
 
-const GRID_MINOR_MS = 40     // faint grid line every 40 ms  (≈ 1 small EKG box)
-const GRID_MAJOR_MS = 200    // bright grid line every 200 ms (≈ 1 large EKG box)
+const GRID_MINOR_MS = 40     // faint grid line every 40 ms  (≈ 1 small ECG box)
+const GRID_MAJOR_MS = 200    // bright grid line every 200 ms (≈ 1 large ECG box)
 
-const SIGNAL_COLOR     = '#10b981' // emerald — the app's "EKG signal" accent color
+const SIGNAL_COLOR     = '#10b981' // emerald — the app's "ECG signal" accent color
 const GRID_MINOR_COLOR = 'rgba(16, 185, 129, 0.06)'
 const GRID_MAJOR_COLOR = 'rgba(16, 185, 129, 0.16)'
 const BASELINE_COLOR   = 'rgba(255, 255, 255, 0.12)'
@@ -32,7 +32,7 @@ const BASELINE_COLOR   = 'rgba(255, 255, 255, 0.12)'
 // For each `measurable: false` rhythm, a short clause naming the specific
 // thing to look for in the trace — slotted into the explanatory note that
 // replaces the PR/QRS/QT cards (see the render below). Keeping these here,
-// keyed by rhythm id, means adding a new irregular rhythm to ekgEngine.js
+// keyed by rhythm id, means adding a new irregular rhythm to ECGEngine.js
 // only requires one new line here, rather than a longer if/else chain.
 const WHAT_TO_WATCH = {
   thirdDegreeBlock:
@@ -59,7 +59,7 @@ const WHAT_TO_WATCH = {
 
 // Draws the faint monitor-style grid: minor lines every 40 ms and every
 // 0.5 mV, with brighter major lines every 200 ms — mirroring the small/large
-// boxes printed on real EKG paper.
+// boxes printed on real ECG paper.
 function drawGrid(ctx, width, height) {
   ctx.lineWidth = 1
   const baselineY = height * BASELINE_FRAC
@@ -105,7 +105,7 @@ function drawWaveform(ctx, width, height, elapsedMs, cycleMs, waves, leadAxisDeg
   for (let x = 0; x <= width; x++) {
     const ageMs      = (width - x) / PIXELS_PER_MS
     const sampleAtMs = elapsedMs - ageMs
-    const voltageMv  = ekgVoltage(sampleAtMs, cycleMs, waves, leadAxisDeg, nativeCycleMs)
+    const voltageMv  = ECGVoltage(sampleAtMs, cycleMs, waves, leadAxisDeg, nativeCycleMs)
     const y          = baselineY - voltageMv * PIXELS_PER_MV
 
     if (x === 0) ctx.moveTo(x, y)
@@ -155,7 +155,7 @@ function drawAnnotations(ctx, width, height, elapsedMs, cycleMs, annotations) {
 }
 
 /**
- * EKGWaveformPrototype — standalone Canvas test bench for the EKG engine.
+ * ECGWaveformPrototype — standalone Canvas test bench for the ECG engine.
  *
  * This is intentionally NOT one of the four module pages. It's a development
  * tool: a place to watch the Gaussian-sum model run continuously and check
@@ -164,7 +164,7 @@ function drawAnnotations(ctx, width, height, elapsedMs, cycleMs, annotations) {
  * simulator (where it will share a master clock with the conduction
  * animation and the cardiac vector).
  */
-export default function EKGWaveformPrototype() {
+export default function ECGWaveformPrototype() {
   const canvasRef = useRef(null)
   const [rhythmId, setRhythmId] = useState('normalSinus')
   const [leadId, setLeadId]     = useState(DEFAULT_LEAD_ID)
@@ -265,7 +265,7 @@ export default function EKGWaveformPrototype() {
       const hr            = activeHrRef.current
       // Tier-2 rhythms scale their full macro-cycle proportionally with the HR
       // slider so all beats compress/expand together. nativeCycleMs is passed
-      // to ekgVoltage so it can scale the time axis to match. Tier-1 rhythms
+      // to ECGVoltage so it can scale the time axis to match. Tier-1 rhythms
       // derive cycleMs directly from rate; no time-axis scaling needed.
       const nativeCycleMs = rhythm.cycleMs ?? null
       const cycleMs       = rhythm.cycleMs
@@ -317,7 +317,7 @@ export default function EKGWaveformPrototype() {
   return (
     <div className="min-h-screen p-8 max-w-5xl mx-auto" style={{ backgroundColor: '#0a0e1a' }}>
       <div className="mb-6">
-        <h1 className="text-xl font-bold text-white mb-1">EKG Waveform Engine — Prototype</h1>
+        <h1 className="text-xl font-bold text-white mb-1">ECG Waveform Engine — Prototype</h1>
         <p className="text-sm text-gray-500">
           Standalone test bench for tuning the Gaussian-sum model and rhythm library before it's wired into Module 3.
         </p>
@@ -420,7 +420,7 @@ export default function EKGWaveformPrototype() {
       </div>
 
       {/* Measured intervals — compare these against the B&B reference ranges
-          while tuning the wave parameters in ekgEngine.js.
+          while tuning the wave parameters in ECGEngine.js.
           NOTE: for the pathological-but-regular rhythms (1st-degree block,
           LBBB, RBBB), seeing PR or QRS read amber here is CORRECT — that's
           the model reproducing the very finding that defines the rhythm.

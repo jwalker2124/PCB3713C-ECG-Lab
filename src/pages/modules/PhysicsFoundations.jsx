@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import p5 from 'p5'
 import ModulePage from '../../components/ModulePage'
 import LeadPlacementLab from '../../components/LeadPlacementLab'
@@ -78,12 +78,13 @@ function Sim1A() {
   useEffect(() => { showEqRef.current = showEq }, [showEq])
 
   useEffect(() => {
-    const W = 540, H = 300, K = 38000, CR = 13
+    const W = 720, H = 400, K = 38000, CR = 11
+    let cancelled = false
 
     const sketch = (p) => {
       const charges = [
-        { x: W / 2 - 100, y: H / 2, q: 1 },
-        { x: W / 2 + 100, y: H / 2, q: -1 },
+        { x: W / 2 - 140, y: H / 2, q: 1 },
+        { x: W / 2 + 140, y: H / 2, q: -1 },
       ]
       let dragging = null
       let lastTap = { t: 0, i: -1 }
@@ -114,22 +115,173 @@ function Sim1A() {
         return -1
       }
 
-      function traceField(sx, sy) {
+      // Walks from a seed point along the field, stopping at a charge of
+      // opposite sign to `source` (lines are free to run past the canvas
+      // edge — p5 clips rendering to the canvas automatically). Seeds from a
+      // negative source walk against the local field vector, since a line
+      // "leaving" a negative charge does so opposite to fld()'s direction.
+      //
+      // If an opposite-sign charge exists anywhere in the scene, the trace
+      // is never allowed to give up just because the local field is weak —
+      // it keeps following the field (up to a generous step budget) until it
+      // actually reaches one, so every line from a positive charge ends up
+      // connecting to a negative whenever one exists. Only when there's no
+      // opposite charge at all does a weak field mean "let it escape to
+      // infinity" (nothing to reach).
+      function traceField(sx, sy, source) {
         const pts = [[sx, sy]]
         let x = sx, y = sy
-        for (let i = 0; i < 350; i++) {
+        const sign = source.q > 0 ? 1 : -1
+        const hasOpposite = charges.some(c => Math.sign(c.q) !== Math.sign(source.q))
+        const maxSteps = hasOpposite ? 2000 : 600
+        for (let i = 0; i < maxSteps; i++) {
           const [ex, ey] = fld(x, y)
           const m = Math.hypot(ex, ey)
-          if (m < 1) break
-          x += 3 * ex / m; y += 3 * ey / m
-          if (x < 0 || x > W || y < 0 || y > H) break
+          if (m < 1e-6) break // true numerical null point — direction is undefined
+          if (!hasOpposite && m < 0.03) break
+          x += sign * 3 * ex / m; y += sign * 3 * ey / m
           let stop = false
-          for (const c of charges)
-            if (c.q < 0 && Math.hypot(x - c.x, y - c.y) < CR + 7) { stop = true; break }
+          for (const c of charges) {
+            if (c === source) continue
+            if (Math.sign(c.q) !== Math.sign(source.q) && Math.hypot(x - c.x, y - c.y) < CR + 7) { stop = true; break }
+          }
           pts.push([x, y])
           if (stop) break
         }
         return pts
+      }
+
+      // One arrowhead roughly every 70px along the path (step size is 3px),
+      // repeated for the whole line so direction stays legible along its
+      // entire length, not just at one spot.
+      function drawArrowheads(pts) {
+        const everyN = Math.max(1, Math.round(70 / 3))
+        for (let idx = everyN; idx < pts.length; idx += everyN) {
+          const [x0, y0] = pts[idx - 1], [x1, y1] = pts[idx]
+          const ang = Math.atan2(y1 - y0, x1 - x0), len = 5
+          p.push()
+          p.translate(x1, y1); p.rotate(ang)
+          p.noStroke(); p.fill(80, 140, 255, 180)
+          p.triangle(0, 0, -len, len * 0.5, -len, -len * 0.5)
+          p.pop()
+        }
+      }
+
+      function drawFieldLines() {
+        // Seed from positive charges only — each line already runs from a
+        // positive to whichever negative it terminates at, so also seeding
+        // from negatives would retrace nearly the same physical lines a
+        // second time (drawn as a visible near-duplicate pair). Only fall
+        // back to seeding from negatives when there's no positive charge at
+        // all, so an isolated negative still shows its own field lines.
+        const positives = charges.filter(c => c.q > 0)
+        const sources = positives.length > 0 ? positives : charges.filter(c => c.q < 0)
+        if (sources.length === 0) return
+        const nSeeds = Math.max(3, Math.min(16, Math.floor(64 / sources.length)))
+        p.noFill(); p.stroke(80, 140, 255, 150); p.strokeWeight(1.3)
+        for (const src of sources) {
+          for (let k = 0; k < nSeeds; k++) {
+            const a = (k / nSeeds) * Math.PI * 2
+            const pts = traceField(src.x + (CR + 5) * Math.cos(a), src.y + (CR + 5) * Math.sin(a), src)
+            if (pts.length > 1) {
+              // A trace seeded at a negative charge is walked outward (away from
+              // it) to build the path, so reverse it here for drawing purposes —
+              // the arrowhead must always point from + toward -.
+              const ordered = src.q < 0 ? pts.slice().reverse() : pts
+              p.beginShape()
+              ordered.forEach(([px, py]) => p.vertex(px, py))
+              p.endShape()
+              drawArrowheads(ordered)
+            }
+          }
+        }
+      }
+
+      // ── Equipotentials: marching squares over a cached voltage grid ──
+      const gsEq = 8, cols = W / gsEq, rows = H / gsEq
+      const cornerV = new Float32Array((cols + 1) * (rows + 1))
+
+      function computeCornerGrid() {
+        for (let j = 0; j <= rows; j++)
+          for (let i = 0; i <= cols; i++)
+            cornerV[j * (cols + 1) + i] = volt(i * gsEq, j * gsEq)
+      }
+      const V = (i, j) => cornerV[j * (cols + 1) + i]
+
+      function pickLevels() {
+        let maxV = 0
+        const step = 24
+        for (let x = step / 2; x < W; x += step) {
+          for (let y = step / 2; y < H; y += step) {
+            let near = false
+            for (const c of charges) if (Math.hypot(x - c.x, y - c.y) < CR * 3) { near = true; break }
+            if (near) continue
+            maxV = Math.max(maxV, Math.abs(volt(x, y)))
+          }
+        }
+        if (maxV < 1) return []
+        // Geometric progression (constant ratio between consecutive levels)
+        // for even, non-clumping spacing. The top of the range is pulled back
+        // from maxV (0.55 instead of 0.85) because equipotential rings pack
+        // tightly close to any point charge no matter how levels are chosen —
+        // staying further from that near-charge extreme keeps the innermost
+        // two rings from landing right on top of each other.
+        const N = 8, levels = []
+        const lo = maxV * 0.1, hi = maxV * 0.55
+        for (let i = 0; i < N; i++) {
+          const t = i / (N - 1)
+          const v = lo * Math.pow(hi / lo, t)
+          levels.push(v, -v)
+        }
+        // A dedicated, much lower-magnitude "outer" level: since it's small
+        // enough that the region beyond it can span more than one charge, its
+        // contour naturally merges across nearby charges (rather than staying
+        // a small closed loop around just one) and reaches all the way to the
+        // canvas edge, instead of every ring stopping short as an isolated shape.
+        const outer = maxV * 0.015
+        levels.push(outer, -outer)
+        return levels
+      }
+
+      function lerpPt(va, vb, pa, pb, level) {
+        const t = (level - va) / (vb - va)
+        return [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])]
+      }
+
+      function drawContour(level) {
+        for (let j = 0; j < rows; j++) {
+          for (let i = 0; i < cols; i++) {
+            const x0 = i * gsEq, y0 = j * gsEq
+            const v00 = V(i, j), v10 = V(i + 1, j), v11 = V(i + 1, j + 1), v01 = V(i, j + 1)
+            const above = [v00 > level, v10 > level, v11 > level, v01 > level]
+            if (above[0] === above[1] && above[1] === above[2] && above[2] === above[3]) continue
+            const cTL = [x0, y0], cTR = [x0 + gsEq, y0], cBR = [x0 + gsEq, y0 + gsEq], cBL = [x0, y0 + gsEq]
+            const crosses = []
+            if (above[0] !== above[1]) crosses.push(lerpPt(v00, v10, cTL, cTR, level))
+            if (above[1] !== above[2]) crosses.push(lerpPt(v10, v11, cTR, cBR, level))
+            if (above[2] !== above[3]) crosses.push(lerpPt(v01, v11, cBL, cBR, level))
+            if (above[3] !== above[0]) crosses.push(lerpPt(v00, v01, cTL, cBL, level))
+            if (crosses.length === 2) {
+              p.line(crosses[0][0], crosses[0][1], crosses[1][0], crosses[1][1])
+            } else if (crosses.length === 4) {
+              // Saddle cell: pair edges by which diagonal corner is "above" the level.
+              if (above[0]) {
+                p.line(crosses[0][0], crosses[0][1], crosses[3][0], crosses[3][1])
+                p.line(crosses[1][0], crosses[1][1], crosses[2][0], crosses[2][1])
+              } else {
+                p.line(crosses[0][0], crosses[0][1], crosses[1][0], crosses[1][1])
+                p.line(crosses[2][0], crosses[2][1], crosses[3][0], crosses[3][1])
+              }
+            }
+          }
+        }
+      }
+
+      function drawEquipotentials() {
+        computeCornerGrid()
+        const levels = pickLevels()
+        p.stroke(110, 220, 140, 150); p.strokeWeight(1)
+        for (const level of levels) drawContour(level)
       }
 
       function drawCharge(c) {
@@ -146,56 +298,16 @@ function Sim1A() {
         const cnv = p.createCanvas(W, H)
         cnv.elt.addEventListener('contextmenu', e => e.preventDefault())
         p.textFont('monospace')
+        if (cancelled) p.remove()
       }
 
       p.draw = () => {
         p.background(15, 20, 30)
 
-        // Voltage heatmap
-        const gs = 7; p.noStroke()
-        for (let x = 0; x < W; x += gs) {
-          for (let y = 0; y < H; y += gs) {
-            const v = volt(x + gs / 2, y + gs / 2)
-            const c = Math.max(-1, Math.min(1, v / 2800))
-            if (c > 0) p.fill(59, 130, 246, c * 85)
-            else p.fill(245, 158, 11, -c * 85)
-            p.rect(x, y, gs, gs)
-          }
-        }
-
-        // Equipotential dots
-        if (showEqRef.current) {
-          const targets = [-2400, -1200, -400, 400, 1200, 2400]
-          p.noStroke()
-          for (let x = 0; x < W; x += 5) {
-            for (let y = 0; y < H; y += 5) {
-              const v = volt(x, y)
-              for (const Vt of targets) {
-                if (Math.abs(v - Vt) < Math.abs(Vt) * 0.07 + 40) {
-                  p.fill(Vt > 0 ? p.color(140, 200, 255, 160) : p.color(255, 200, 100, 160))
-                  p.rect(x, y, 3, 3)
-                  break
-                }
-              }
-            }
-          }
-        }
-
-        // Field lines (skip during drag for performance)
+        // Field lines + equipotentials (skip during drag for performance)
         if (dragging === null) {
-          p.noFill(); p.stroke(255, 255, 255, 85); p.strokeWeight(1.2)
-          for (const c of charges) {
-            if (c.q <= 0) continue
-            for (let k = 0; k < 8; k++) {
-              const a = (k / 8) * Math.PI * 2
-              const pts = traceField(c.x + (CR + 5) * Math.cos(a), c.y + (CR + 5) * Math.sin(a))
-              if (pts.length > 1) {
-                p.beginShape()
-                pts.forEach(([px, py]) => p.vertex(px, py))
-                p.endShape()
-              }
-            }
-          }
+          drawFieldLines()
+          if (showEqRef.current) drawEquipotentials()
         }
 
         charges.forEach(drawCharge)
@@ -221,7 +333,7 @@ function Sim1A() {
           }
           return
         }
-        if (p.mouseButton === p.RIGHT) charges.push({ x: p.mouseX, y: p.mouseY, q: -1 })
+        if (p.mouseButton.right) charges.push({ x: p.mouseX, y: p.mouseY, q: -1 })
         else charges.push({ x: p.mouseX, y: p.mouseY, q: 1 })
       }
       p.mouseDragged = () => {
@@ -233,7 +345,7 @@ function Sim1A() {
     }
 
     const inst = new p5(sketch, containerRef.current)
-    return () => inst.remove()
+    return () => { cancelled = true; inst.remove() }
   }, [])
 
   return (
@@ -257,6 +369,7 @@ function Sim1B() {
 
   useEffect(() => {
     const W = 480, H = 280, K = 50000, SEP = 72
+    let cancelled = false
 
     const sketch = (p) => {
       let angle = 0
@@ -294,7 +407,7 @@ function Sim1B() {
         p.text(positive ? '+' : '−', x, y)
       }
 
-      p.setup = () => { p.createCanvas(W, H); p.textFont('monospace') }
+      p.setup = () => { p.createCanvas(W, H); p.textFont('monospace'); if (cancelled) p.remove() }
 
       p.draw = () => {
         p.background(15, 20, 30)
@@ -355,7 +468,7 @@ function Sim1B() {
     }
 
     const inst = new p5(sketch, containerRef.current)
-    return () => inst.remove()
+    return () => { cancelled = true; inst.remove() }
   }, [])
 
   return (
@@ -377,6 +490,7 @@ function Sim1C() {
 
   useEffect(() => {
     const W = 480, H = 280, K = 42000, PR = 9
+    let cancelled = false
 
     const sketch = (p) => {
       let probeA = { x: W / 2 - 90, y: H / 2 - 65 }
@@ -390,7 +504,7 @@ function Sim1C() {
         return K * (1 / r1 - 1 / r2)
       }
 
-      p.setup = () => { p.createCanvas(W, H); p.textFont('monospace') }
+      p.setup = () => { p.createCanvas(W, H); p.textFont('monospace'); if (cancelled) p.remove() }
 
       p.draw = () => {
         p.background(15, 20, 30)
@@ -455,7 +569,7 @@ function Sim1C() {
         p.fill(168, 85, 247); p.text(`V(B) = ${vB.toFixed(0)}`, 16, 30)
         p.fill(255, 255, 255, 210); p.text(`ΔV  = ${dv.toFixed(0)}`, 16, 44)
         p.fill(150, 150, 150, 100); p.textSize(9)
-        p.text('(what the EKG records)', 16, 58)
+        p.text('(what the ECG records)', 16, 58)
 
         // Hint
         p.fill(255, 255, 255, 60); p.textAlign(p.LEFT, p.BOTTOM); p.textSize(10)
@@ -475,7 +589,7 @@ function Sim1C() {
     }
 
     const inst = new p5(sketch, containerRef.current)
-    return () => inst.remove()
+    return () => { cancelled = true; inst.remove() }
   }, [])
 
   return (
@@ -500,6 +614,7 @@ function Sim1D() {
   useEffect(() => {
     const W = 480, H = 300
     const OX = W / 2, OY = H / 2
+    let cancelled = false
 
     const sketch = (p) => {
       let vecA = { x: 80, y: -60 }
@@ -521,7 +636,7 @@ function Sim1D() {
           x2 - hs * Math.cos(ang + 0.42), y2 - hs * Math.sin(ang + 0.42))
       }
 
-      p.setup = () => { p.createCanvas(W, H); p.textFont('monospace') }
+      p.setup = () => { p.createCanvas(W, H); p.textFont('monospace'); if (cancelled) p.remove() }
 
       p.draw = () => {
         p.background(15, 20, 30)
@@ -629,7 +744,7 @@ function Sim1D() {
     }
 
     const inst = new p5(sketch, containerRef.current)
-    return () => inst.remove()
+    return () => { cancelled = true; inst.remove() }
   }, [])
 
   return (
@@ -648,7 +763,7 @@ export default function PhysicsFoundations() {
       moduleId="physics"
       number={1}
       title="Physics foundations"
-      objective="An EKG does not directly record the heart's electrical signal. It records the projection of the net cardiac dipole vector onto a lead axis — a geometric operation you already know from Physics 2."
+      objective="An ECG does not directly record the heart's electrical signal. It records the projection of the net cardiac dipole vector onto a lead axis — a geometric operation you already know from Physics 2."
       description="This module rebuilds the bridge between Physics 2 and cardiology. You will interactively explore how point charges create electric fields, how a dipole emerges from charge separation, what voltage actually measures between two points, and how projecting a moving vector onto different axes produces different waveform amplitudes. By the end, Einthoven's Triangle will feel like a natural consequence of vector projection — not a memorized fact."
     >
 
@@ -699,11 +814,11 @@ export default function PhysicsFoundations() {
       </Section>
 
       {/* ── 1C ──────────────────────────────────────────────────────────────── */}
-      <Section label="1C" title="EKGs measure voltage difference, not absolute voltage">
+      <Section label="1C" title="ECGs measure voltage difference, not absolute voltage">
         <p className="text-sm text-gray-400 leading-relaxed mb-3">
           Drag the two probes to different positions in the dipole field. The panel shows each
           probe's voltage and the difference ΔV between them. Use the slider to change the charge
-          separation (the dipole moment) and watch ΔV scale. This is exactly what one EKG lead
+          separation (the dipole moment) and watch ΔV scale. This is exactly what one ECG lead
           measures: the potential difference between its two electrodes.
         </p>
 
@@ -725,7 +840,7 @@ export default function PhysicsFoundations() {
         <p className="text-sm text-gray-400 leading-relaxed mb-3">
           Vector <strong className="text-blue-400">A</strong> is the cardiac dipole at one instant.
           Vector <strong className="text-amber-400">B</strong> is the lead axis (the direction from −
-          electrode to + electrode). The EKG voltage recorded by that lead is A&thinsp;·&thinsp;B.
+          electrode to + electrode). The ECG voltage recorded by that lead is A&thinsp;·&thinsp;B.
           The dashed line shows the projection of A onto B; the thick blue segment on the B axis
           shows its signed length.
         </p>
@@ -751,7 +866,7 @@ export default function PhysicsFoundations() {
         </div>
 
         <Callout>
-          <strong className="text-white">Insight:</strong> Every EKG lead is a fixed axis (B).
+          <strong className="text-white">Insight:</strong> Every ECG lead is a fixed axis (B).
           The cardiac dipole rotates through one full arc per heartbeat (A sweeps through time).
           The waveform you see on screen is simply A&thinsp;·&thinsp;B plotted against time — the
           dot product of a rotating vector onto a stationary axis. Leads aligned with the mean
@@ -765,7 +880,7 @@ export default function PhysicsFoundations() {
       <Section label="1E" title="Interactive: place electrodes and see the projection in real time">
         <Callout accent="#818cf8">
           <strong className="text-white">This is the conceptual payoff of sections 1A–1D.</strong>{' '}
-          Drag the electrodes anywhere on the body. Watch the EKG strip respond to the dot product
+          Drag the electrodes anywhere on the body. Watch the ECG strip respond to the dot product
           between the rotating cardiac dipole and your lead axis. Try placing your lead parallel to
           Lead II — you'll get the biggest QRS. Rotate 90° — the line goes flat. The physics is
           identical to projecting vector A onto vector B in section 1D.
@@ -779,7 +894,7 @@ export default function PhysicsFoundations() {
             {[
               { n: '1', text: 'Place electrodes horizontally (left−right). This approximates Lead I (0°). Notice the P wave and T wave are positive, QRS tallest.' },
               { n: '2', text: 'Rotate to approximately 60° (upper-left to lower-right). This is Lead II — the axis closest to the mean cardiac vector. Maximum QRS amplitude.' },
-              { n: '3', text: 'Place the axis perpendicular to Lead II (~−30°, upper-right to lower-left). The EKG approaches a flat line — pure isoelectric.' },
+              { n: '3', text: 'Place the axis perpendicular to Lead II (~−30°, upper-right to lower-left). The ECG approaches a flat line — pure isoelectric.' },
               { n: '4', text: 'Flip the electrodes (swap + and −). The waveform inverts. Same axis, opposite polarity — amplitude unchanged, sign flipped.' },
             ].map(({ n, text }) => (
               <div key={n} className="flex gap-2.5">

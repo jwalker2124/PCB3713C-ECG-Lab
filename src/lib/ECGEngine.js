@@ -1,4 +1,4 @@
-// ekgEngine.js
+﻿// ECGEngine.js
 //
 // Rebuilt architecture: each cardiac complex is generated INDEPENDENTLY from
 // physiological parameters. Heart rate controls only the RR interval — how
@@ -20,7 +20,7 @@ function projectionFactor(sourceAxisDeg, leadAxisDeg) {
   return Math.cos(((sourceAxisDeg - leadAxisDeg) * Math.PI) / 180)
 }
 
-function ekgNoise(tMs) {
+function ECGNoise(tMs) {
   return (
     0.012 * Math.sin(tMs * 0.0157 + 1.7) +
     0.008 * Math.sin(tMs * 0.0421 + 4.1) +
@@ -718,7 +718,7 @@ export function vfibVoltage(tMs) {
   let v = 0
   for (let i = 0; i < freqs.length; i++)
     v += amps[i] * Math.sin(tMs * freqs[i] + phases[i])
-  return 0.6 * (v / 3.5) + ekgNoise(tMs) * 3
+  return 0.6 * (v / 3.5) + ECGNoise(tMs) * 3
 }
 
 function buildVFibWaves(cycleMs = 1100) {
@@ -736,7 +736,7 @@ function buildVFibWaves(cycleMs = 1100) {
 
 // ─── RHYTHMS — backward-compatible object ─────────────────────────────────────
 // Derived from RHYTHM_PRESETS. Shape is identical to the original RHYTHMS so
-// EKGWaveformPrototype.jsx and HeartAnimation.jsx require no changes.
+// ECGWaveformPrototype.jsx and HeartAnimation.jsx require no changes.
 
 function presetToRhythm(id, preset) {
   const base = { id, label: preset.label, description: preset.description ?? '' }
@@ -802,14 +802,14 @@ export function cycleVoltage(tInCycleMs, waves, leadAxisDeg = LEADS.I.axisDeg) {
   }, 0)
 }
 
-export function ekgVoltage(elapsedMs, cycleMs, waves, leadAxisDeg = LEADS.I.axisDeg, nativeCycleMs = null) {
+export function ECGVoltage(elapsedMs, cycleMs, waves, leadAxisDeg = LEADS.I.axisDeg, nativeCycleMs = null) {
   // VFib detection: no identifiable waves, just chaos
   if (!waves || waves.length === 0) return vfibVoltage(elapsedMs)
 
   const warpedMs   = warpTime(elapsedMs)
   const tInCycle   = ((warpedMs % cycleMs) + cycleMs) % cycleMs
   const tEvaluated = nativeCycleMs !== null ? tInCycle * (nativeCycleMs / cycleMs) : tInCycle
-  return cycleVoltage(tEvaluated, waves, leadAxisDeg) + ekgNoise(elapsedMs)
+  return cycleVoltage(tEvaluated, waves, leadAxisDeg) + ECGNoise(elapsedMs)
 }
 
 export function measureIntervals(waves) {
@@ -832,7 +832,7 @@ export const NORMAL_SINUS_WAVES = buildWaveArray(RHYTHM_PRESETS.normalSinus)
 export const DEFAULT_HEART_RATE_BPM = 75
 
 // ─── buildRhythmFromParams — live synthesis from UI parameters ────────────────
-// Translates EKGSimulator's parameter controls → {waves, cycleMs, nativeCycleMs}.
+// Translates ECGSimulator's parameter controls → {waves, cycleMs, nativeCycleMs}.
 // Lets students derive any rhythm by understanding which parameters produce it,
 // rather than selecting a pre-labelled preset.
 export function buildRhythmFromParams(ui) {

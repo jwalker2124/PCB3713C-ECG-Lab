@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+﻿import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useAuth } from '../../context/AuthContext'
 import { supabase } from '../../lib/supabase'
 import ModulePage from '../../components/ModulePage'
 import {
   RHYTHMS, RHYTHM_PRESETS, complexWaves,
-  ekgVoltage, LEADS,
-} from '../../lib/ekgEngine'
+  ECGVoltage, LEADS,
+} from '../../lib/ECGEngine'
 
 // ── Strip canvas config ───────────────────────────────────────────────────────
 const SW = 820, SH = 150
@@ -496,7 +496,7 @@ const CASES = [
   },
 ]
 
-// ── EKG Strip renderer ────────────────────────────────────────────────────────
+// ── ECG Strip renderer ────────────────────────────────────────────────────────
 function drawGrid(ctx, w, h) {
   const byY = h * BL
   const step = 40 * PX_MS
@@ -522,14 +522,14 @@ function drawTrace(ctx, w, h, elapsedMs, rhythm) {
   ctx.beginPath()
   for (let x = 0; x <= w; x++) {
     const tMs = elapsedMs - (w - x) / PX_MS
-    const v = ekgVoltage(tMs, cycleMs, waves, LEAD_AXIS, nativeCycleMs)
+    const v = ECGVoltage(tMs, cycleMs, waves, LEAD_AXIS, nativeCycleMs)
     const y = byY - v * PX_MV
     if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y)
   }
   ctx.strokeStyle = EMERALD; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.stroke()
 }
 
-function EKGStrip({ rhythm }) {
+function ECGStrip({ rhythm }) {
   const canvasRef  = useRef(null)
   const elapsedRef = useRef(0)
   const lastRef    = useRef(null)
@@ -742,8 +742,8 @@ function ScenarioCard({ caseData, onSubmit }) {
       <HPICard hpi={caseData.hpi} />
 
       <div>
-        <p className="text-xs text-gray-500 uppercase tracking-widest mb-2 font-medium">Lead II — EKG Strip</p>
-        <EKGStrip rhythm={rhythm} />
+        <p className="text-xs text-gray-500 uppercase tracking-widest mb-2 font-medium">Lead II — ECG Strip</p>
+        <ECGStrip rhythm={rhythm} />
         <p className="text-xs text-gray-600 mt-1.5">25 mm/s · 1 cm/mV standard calibration</p>
       </div>
 
@@ -889,8 +889,8 @@ export default function PatientScenarios() {
       moduleId="scenarios"
       number={4}
       title="Patient Scenarios"
-      objective="Run the full diagnostic chain: EKG pattern → conduction system failure → mechanism → clinical presentation. And back again."
-      description="Six cases — each with a clinical vignette and a live EKG strip. Identify the rhythm, measure key intervals, locate the failure in the conduction system, and explain the physiology. Case 1 is scaffolded with step-by-step prompts. Cases 2–6 offer no hints."
+      objective="Run the full diagnostic chain: ECG pattern → conduction system failure → mechanism → clinical presentation. And back again."
+      description="Six cases — each with a clinical vignette and a live ECG strip. Identify the rhythm, measure key intervals, locate the failure in the conduction system, and explain the physiology. Case 1 is scaffolded with step-by-step prompts. Cases 2–6 offer no hints."
     >
       <ProgressDashboard
         scores={scores}

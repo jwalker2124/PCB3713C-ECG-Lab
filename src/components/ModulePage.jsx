@@ -1,16 +1,16 @@
-import { useNavigate } from 'react-router-dom'
+﻿import { useNavigate } from 'react-router-dom'
 import { useMode, MODULE_ORDER } from '../context/ModeContext'
 
 /**
  * ModulePage — the visual shell every module page renders inside.
  *
  * Props:
- *   moduleId    — 'physics' | 'cardiac' | 'ekg' | 'scenarios'
+ *   moduleId    — 'physics' | 'cardiac' | 'ECG' | 'scenarios'
  *   number      — 1-4
  *   title       — display title
  *   objective   — the single "aha moment" statement for this module
  *   description — a paragraph describing what the module covers
- *   children    — the interactive content (p5.js canvas, EKG strip, etc.)
+ *   children    — the interactive content (p5.js canvas, ECG strip, etc.)
  *                 When null, shows a "coming soon" placeholder
  */
 export default function ModulePage({ moduleId, number, title, objective, description, children }) {
@@ -89,7 +89,7 @@ export default function ModulePage({ moduleId, number, title, objective, descrip
             </div>
             <p className="text-gray-500 text-sm font-medium">Interactive content coming in Step 2+</p>
             <p className="text-gray-600 text-xs mt-1">
-              The physics simulations, EKG engine, and patient cases will live here
+              The physics simulations, ECG engine, and patient cases will live here
             </p>
           </div>
         )}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from 'react'
+﻿import { useEffect, useRef, useMemo } from 'react'
 
 // ─── Conduction map builder ──────────────────────────────────────────────────
 export function buildConductionMap(rhythmId, waves) {
@@ -485,7 +485,7 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
             const isBundlePath = entry.id === 'lbundle' || entry.id === 'rbundle'
             if (isBundlePath) el.setAttribute('stroke', STATE_FILL.blocked)
             else              el.setAttribute('fill',   STATE_FILL.blocked)
-            el.setAttribute('filter', 'url(#ekg-glow-purple)')
+            el.setAttribute('filter', 'url(#ECG-glow-purple)')
             activeIds.add(entry.id + '_blocked')
           }
           return
@@ -502,7 +502,7 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
           const opacity = 0.25 + 0.6 * osc
           el.setAttribute('fill', STATE_FILL.shimmer)
           el.style.opacity = opacity
-          el.setAttribute('filter', opacity > 0.6 ? 'url(#ekg-glow)' : 'none')
+          el.setAttribute('filter', opacity > 0.6 ? 'url(#ECG-glow)' : 'none')
           activeIds.add(entry.id + '_shimmer')
           return
         }
@@ -527,16 +527,16 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
               if (overlay) {
                 overlay.style.opacity = intensity
                 overlay.setAttribute('fill', STATE_FILL.repol)
-                overlay.setAttribute('filter', 'url(#ekg-glow-amber)')
+                overlay.setAttribute('filter', 'url(#ECG-glow-amber)')
               }
             }
             return
           }
 
           const fill   = STATE_FILL[entry.state] ?? STATE_FILL.active
-          const filter = entry.state === 'ectopic' ? 'url(#ekg-glow-indigo)'
-                       : entry.state === 'delayed' ? 'url(#ekg-glow-amber)'
-                       : 'url(#ekg-glow)'
+          const filter = entry.state === 'ectopic' ? 'url(#ECG-glow-indigo)'
+                       : entry.state === 'delayed' ? 'url(#ECG-glow-amber)'
+                       : 'url(#ECG-glow)'
 
           const swpDef = SWEEP_TABLE[entry.id]
           if (swpDef) {
@@ -598,24 +598,24 @@ export default function HeartAnimation({ clockRef, rhythmId, rhythm, className =
       <svg viewBox="0 0 200 260" width="200" height="260" style={{ overflow: 'visible' }}>
         <defs>
           {/* Blue glow for depolarization */}
-          <filter id="ekg-glow" x="-40%" y="-40%" width="180%" height="180%">
+          <filter id="ECG-glow" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
           {/* Purple glow for blocks */}
-          <filter id="ekg-glow-purple" x="-40%" y="-40%" width="180%" height="180%">
+          <filter id="ECG-glow-purple" x="-40%" y="-40%" width="180%" height="180%">
             <feFlood floodColor="#a855f7" floodOpacity="0.4" result="color" />
             <feComposite in="color" in2="SourceGraphic" operator="in" result="tinted" />
             <feGaussianBlur in="tinted" stdDeviation="4" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
           {/* Amber glow for delayed/repolarization */}
-          <filter id="ekg-glow-amber" x="-40%" y="-40%" width="180%" height="180%">
+          <filter id="ECG-glow-amber" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>
           {/* Indigo glow for ectopic */}
-          <filter id="ekg-glow-indigo" x="-40%" y="-40%" width="180%" height="180%">
+          <filter id="ECG-glow-indigo" x="-40%" y="-40%" width="180%" height="180%">
             <feGaussianBlur stdDeviation="4" result="blur" />
             <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
           </filter>

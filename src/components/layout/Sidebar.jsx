@@ -1,4 +1,4 @@
-import { useLocation, useNavigate, NavLink } from 'react-router-dom'
+﻿import { useLocation, useNavigate, NavLink } from 'react-router-dom'
 import { useMode, MODULE_ORDER, MODULE_INFO } from '../../context/ModeContext'
 import { useAuth } from '../../context/AuthContext'
 
@@ -20,18 +20,18 @@ export default function Sidebar({ isLabMode }) {
   const modeLabel = isLabMode ? 'Lab mode' : 'Free play'
 
   return (
-    <aside className="w-60 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col min-h-screen">
+    <aside className="w-60 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-screen sticky top-0">
 
       {/* App brand + current mode indicator */}
       <div className="px-4 py-4 border-b border-gray-800">
-        {/* Mini EKG blip logo */}
+        {/* Mini ECG blip logo */}
         <div className="flex items-center gap-2 mb-3">
           <svg viewBox="0 0 48 24" className="w-8 h-4" fill="none">
             <polyline points="0,12 8,12 12,4 16,20 20,2 24,22 28,12 48,12"
               stroke="#10b981" strokeWidth="2"
               strokeLinecap="round" strokeLinejoin="round" fill="none"/>
           </svg>
-          <span className="text-gray-300 text-xs font-medium tracking-tight">EKG Platform</span>
+          <span className="text-gray-300 text-xs font-medium tracking-tight">ECG Platform</span>
         </div>
 
         {/* Mode pill */}
@@ -42,7 +42,7 @@ export default function Sidebar({ isLabMode }) {
       </div>
 
       {/* Module list */}
-      <nav className="flex-1 px-2 py-3 space-y-0.5">
+      <nav className="flex-1 overflow-y-auto px-2 py-3 space-y-0.5">
         {MODULE_ORDER.map((moduleId) => {
           const info      = MODULE_INFO[moduleId]
           const completed = progress.has(moduleId)
@@ -102,7 +102,7 @@ export default function Sidebar({ isLabMode }) {
       {/* Footer actions */}
       <div className="px-2 py-3 border-t border-gray-800 space-y-0.5">
         <NavLink
-          to="/dev/ekg-prototype"
+          to="/dev/ECG-prototype"
           className={({ isActive }) =>
             `w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-xs text-left ${
               isActive ? 'text-yellow-400 bg-yellow-400/10' : 'text-gray-600 hover:text-yellow-400 hover:bg-gray-800/60'
@@ -110,7 +110,7 @@ export default function Sidebar({ isLabMode }) {
           }
         >
           <FlaskIcon />
-          EKG Prototype
+          ECG Prototype
         </NavLink>
         <button
           onClick={() => navigate('/mode')}

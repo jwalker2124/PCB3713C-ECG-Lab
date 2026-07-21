@@ -1,9 +1,9 @@
-import { useState } from 'react'
+﻿import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useEffect } from 'react'
 
-function EKGLogo() {
+function ECGLogo() {
   return (
     <svg viewBox="0 0 64 24" className="w-14 h-6" fill="none">
       <polyline
@@ -63,9 +63,9 @@ export default function Login() {
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-3 mb-2">
-            <EKGLogo />
+            <ECGLogo />
           </div>
-          <h1 className="text-white text-lg font-semibold">EKG Learning Platform</h1>
+          <h1 className="text-white text-lg font-semibold">ECG Learning Platform</h1>
           <p className="text-gray-500 text-sm mt-1">Cardiac electrophysiology for BME students</p>
         </div>
 

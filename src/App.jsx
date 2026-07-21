@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+﻿import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuth }  from './context/AuthContext'
 import { useMode }  from './context/ModeContext'
 
@@ -6,12 +6,12 @@ import ProtectedRoute                from './components/layout/ProtectedRoute'
 import LabGuard                      from './components/layout/LabGuard'
 import { LabLayout, FreePlayLayout } from './components/layout/Layouts'
 
-import EKGWaveformPrototype from './pages/dev/EKGWaveformPrototype'
+import ECGWaveformPrototype from './pages/dev/ECGWaveformPrototype'
 import Login              from './pages/Login'
 import ModeSelect         from './pages/ModeSelect'
 import PhysicsFoundations from './pages/modules/PhysicsFoundations'
 import CardiacBridge      from './pages/modules/CardiacBridge'
-import EKGSimulator       from './pages/modules/EKGSimulator'
+import ECGSimulator       from './pages/modules/ECGSimulator'
 import PatientScenarios   from './pages/modules/PatientScenarios'
 
 // Smart redirect from "/" based on auth state + saved mode preference
@@ -31,9 +31,9 @@ export default function App() {
       <Route path="/"     element={<RootRedirect />} />
       <Route path="/login" element={<Login />} />
 
-      {/* Dev-only: standalone test bench for the EKG waveform engine.
+      {/* Dev-only: standalone test bench for the ECG waveform engine.
           Remove this route once the engine is tuned and folded into Module 3. */}
-      <Route path="/dev/ekg-prototype" element={<ProtectedRoute><EKGWaveformPrototype /></ProtectedRoute>} />
+      <Route path="/dev/ECG-prototype" element={<ProtectedRoute><ECGWaveformPrototype /></ProtectedRoute>} />
       <Route path="/mode"  element={<ProtectedRoute><ModeSelect /></ProtectedRoute>} />
 
       {/* Lab Mode — linear, gated */}
@@ -41,7 +41,7 @@ export default function App() {
         <Route index        element={<Navigate to="physics" replace />} />
         <Route path="physics"   element={<PhysicsFoundations />} />
         <Route path="cardiac"   element={<LabGuard moduleId="cardiac">  <CardiacBridge  /></LabGuard>} />
-        <Route path="ekg"       element={<LabGuard moduleId="ekg">      <EKGSimulator   /></LabGuard>} />
+        <Route path="ECG"       element={<LabGuard moduleId="ECG">      <ECGSimulator   /></LabGuard>} />
         <Route path="scenarios" element={<LabGuard moduleId="scenarios"><PatientScenarios /></LabGuard>} />
       </Route>
 
@@ -50,7 +50,7 @@ export default function App() {
         <Route index        element={<Navigate to="physics" replace />} />
         <Route path="physics"   element={<PhysicsFoundations />} />
         <Route path="cardiac"   element={<CardiacBridge />} />
-        <Route path="ekg"       element={<EKGSimulator />} />
+        <Route path="ECG"       element={<ECGSimulator />} />
         <Route path="scenarios" element={<PatientScenarios />} />
       </Route>
 
