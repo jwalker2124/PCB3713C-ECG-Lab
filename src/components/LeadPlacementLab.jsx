@@ -1,9 +1,14 @@
 ﻿import { useEffect, useRef, useState } from 'react'
 import { ECGVoltage, buildRhythmFromParams } from '../lib/ECGEngine'
 
+function PlayIcon()  { return <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg> }
+function PauseIcon() { return <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M7 5h4v14H7zm6 0h4v14h-4z"/></svg> }
+
+const SPEEDS = [0.1, 0.25, 0.4, 0.7, 1]
+
 // ── Canvas sizes ──────────────────────────────────────────────────────────────
 const BW = 500, BH = 330    // body canvas
-const EW = 500, EH = 110    // ECG strip canvas
+const EW = 500, EH = 150    // ECG strip canvas
 
 // Cardiac dipole origin (center of chest in body canvas coords)
 const CX = 250, CY = 158
@@ -13,8 +18,15 @@ const DIPOLE_SCALE = 52
 
 // ECG strip constants
 const PX_MS = 0.20
-const PX_MV = 58
-const BL    = 0.55          // baseline y-fraction in ECG canvas
+const PX_MV = 45
+// Baseline sits lower than center since the R wave (up to 1.5mV) swings much
+// further above baseline than the Q/S waves swing below it — this leaves
+// enough headroom on both sides that the trace no longer clips the top edge.
+const BL    = 0.62          // baseline y-fraction in ECG canvas
+
+// Slows the whole animation down relative to real time so the cardiac vector
+// and its projection are easier to follow (1 = real-time heart rate).
+const TIME_SCALE = 0.4
 
 // Pre-built rhythm (normal sinus, constant — only lead axis changes)
 const RHYTHM = buildRhythmFromParams({
@@ -150,13 +162,24 @@ export default function LeadPlacementLab() {
     minus: { x: 138, y: 105 },
   })
   const dragging   = useRef(null)   // 'plus' | 'minus' | null
-  const t0Ref      = useRef(null)
 
   const [showEinthoven, setShowEinthoven] = useState(true)
+  const [playing, setPlaying] = useState(true)
+  const [speed, setSpeed] = useState(TIME_SCALE)
 
-  // Track showEinthoven in a ref for use inside rAF
-  const showERef = useRef(showEinthoven)
+  // Track state in refs for use inside rAF without re-subscribing the loop
+  const showERef  = useRef(showEinthoven)
+  const playingRef = useRef(playing)
+  const speedRef   = useRef(speed)
   useEffect(() => { showERef.current = showEinthoven }, [showEinthoven])
+  useEffect(() => { playingRef.current = playing }, [playing])
+  useEffect(() => { speedRef.current = speed }, [speed])
+
+  // Accumulated simulation time (ms) — advances only while playing, at the
+  // current speed multiplier, so pausing freezes it and changing speed
+  // never causes a jump in the animation.
+  const simTimeRef = useRef(0)
+  const lastTsRef  = useRef(null)
 
   useEffect(() => {
     const bodyCanvas = bodyRef.current
@@ -168,8 +191,11 @@ export default function LeadPlacementLab() {
     const { waves, cycleMs, nativeCycleMs } = RHYTHM
 
     const frame = (ts) => {
-      if (t0Ref.current === null) t0Ref.current = ts
-      const elapsed = ts - t0Ref.current
+      if (lastTsRef.current === null) lastTsRef.current = ts
+      const dtReal = ts - lastTsRef.current
+      lastTsRef.current = ts
+      if (playingRef.current) simTimeRef.current += dtReal * speedRef.current
+      const elapsed = simTimeRef.current
       const tMs = elapsed % cycleMs
 
       const { plus, minus } = elec.current
@@ -422,6 +448,38 @@ export default function LeadPlacementLab() {
           >
             Einthoven overlay
           </button>
+        </div>
+      </div>
+
+      {/* Playback controls */}
+      <div className="px-5 py-2.5 border-b border-gray-800 flex items-center gap-4 flex-wrap">
+        <button
+          onClick={() => setPlaying(v => !v)}
+          className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+            playing
+              ? 'bg-gray-800 text-gray-300 border-gray-700'
+              : 'bg-emerald-950/60 text-emerald-300 border-emerald-700/50'
+          }`}
+        >
+          {playing ? <PauseIcon /> : <PlayIcon />}
+          {playing ? 'Pause' : 'Play'}
+        </button>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs uppercase tracking-widest text-gray-600 mr-0.5">Speed</span>
+          {SPEEDS.map((s) => (
+            <button
+              key={s}
+              onClick={() => setSpeed(s)}
+              className={`px-2 py-1 rounded-md text-xs font-mono border transition-colors ${
+                speed === s
+                  ? 'bg-indigo-950/60 text-indigo-300 border-indigo-700/50'
+                  : 'text-gray-500 border-gray-700 hover:text-gray-300'
+              }`}
+            >
+              {s}×
+            </button>
+          ))}
         </div>
       </div>
 
